@@ -1,3 +1,12 @@
+const refreshParam = {
+  name: "refresh",
+  in: "query",
+  required: false,
+  description: "Bypass cache and force fresh scrape (1 to enable)",
+  schema: { type: "string", enum: ["0", "1"] },
+  example: "1",
+};
+
 const spec = {
   info: {
     title: "Anikoto Scraper API",
@@ -14,14 +23,7 @@ const spec = {
           "Returns spotlight carousel, latest episodes, new release, and top anime by day / week / month.",
         operationId: "getHome",
         parameters: [
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache and force a fresh scrape",
-            schema: { type: "string", enum: ["1"] },
-            example: "1",
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -71,13 +73,7 @@ const spec = {
             schema: { type: "string" },
             example: "one piece",
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
           {
             name: "page",
             in: "query",
@@ -180,7 +176,15 @@ const spec = {
             schema: { type: "string", enum: ["default", "latest-updated", "latest-added", "score", "name-az", "release-date", "most-viewed", "number_of_episodes"] },
             example: "score",
           },
-          { name: "page", in: "query", required: false, description: "Page number (default: 1)", schema: { type: "integer" }, example: "1" },
+          { name: "page", in: "query", required: false, description: "Page number (default: 1)", schema: { type: "integer" }, example: 1 },
+          {
+            name: "refresh",
+            in: "query",
+            required: false,
+            description: "Bypass cache and force fresh scrape (1 to enable)",
+            schema: { type: "string", enum: ["0", "1"] },
+            example: "1",
+          },
         ],
         responses: {
           "200": {
@@ -245,13 +249,7 @@ const spec = {
             schema: { type: "integer" },
             example: 12,
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -308,13 +306,7 @@ const spec = {
             schema: { type: "string" },
             example: "10",
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -373,13 +365,7 @@ const spec = {
             schema: { type: "string" },
             example: "one-piece-odmau",
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -434,13 +420,7 @@ const spec = {
             schema: { type: "string" },
             example: "one-piece-odmau",
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -482,13 +462,7 @@ const spec = {
             schema: { type: "string" },
             example: "4127",
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -543,22 +517,14 @@ const spec = {
       },
     },
 
-    "/latest": {
+    "/updated": {
       get: {
         tags: ["Browse"],
-        summary: "Latest / popular anime listing",
+        summary: "Latest updated anime listing",
         description:
-          "Paginated listing of anime sorted by latest-updated, new-release, or most-viewed.",
-        operationId: "getLatest",
+          "Paginated listing of anime scraped directly from https://anikoto.net/latest-updated.",
+        operationId: "getUpdated",
         parameters: [
-          {
-            name: "type",
-            in: "query",
-            required: false,
-            description: "Listing type (default: latest-updated)",
-            schema: { type: "string", enum: ["latest-updated", "new-release", "most-viewed"] },
-            example: "latest-updated",
-          },
           {
             name: "page",
             in: "query",
@@ -567,6 +533,7 @@ const spec = {
             schema: { type: "integer" },
             example: "1",
           },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -579,6 +546,71 @@ const spec = {
                     ok: { type: "boolean", example: true },
                     cached: { type: "boolean" },
                     data: { type: "array", items: { $ref: "AnimeCard" } },
+                  },
+                },
+              },
+            },
+          },
+          "500": { description: "Internal server error" },
+        },
+      },
+    },
+
+    "/widget": {
+      get: {
+        tags: ["Browse"],
+        summary: "Home widgets data",
+        description:
+          "Fetch dynamic home widgets: updated-all (default), updated-sub, updated-dub, trending, random.",
+        operationId: "getWidgetData",
+        parameters: [
+          {
+            name: "name",
+            in: "query",
+            required: false,
+            description: "Widget name (default: updated-all)",
+            schema: {
+              type: "string",
+              enum: [
+                "updated-all",
+                "updated-sub",
+                "updated-dub",
+                "trending",
+                "random"
+              ]
+            },
+            example: "updated-all",
+          },
+          {
+            name: "page",
+            in: "query",
+            required: false,
+            description: "Page number for home widgets (default: 1)",
+            schema: { type: "integer" },
+            example: 1,
+          },
+          refreshParam,
+        ],
+        responses: {
+          "200": {
+            description: "Widget data results",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    cached: { type: "boolean" },
+                    data: {
+                      type: "object",
+                      properties: {
+                        results: { type: "array", items: { $ref: "AnimeCard" } },
+                        currentPage: { type: "integer", example: 1 },
+                        hasNextPage: { type: "boolean", example: true },
+                        hasPreviousPage: { type: "boolean", example: false },
+                        maxPage: { type: "integer", example: 2 },
+                      },
+                    },
                   },
                 },
               },
@@ -612,6 +644,7 @@ const spec = {
             schema: { type: "integer" },
             example: "1",
           },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -657,6 +690,7 @@ const spec = {
             schema: { type: "integer" },
             example: "1",
           },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -702,6 +736,7 @@ const spec = {
             schema: { type: "integer" },
             example: "1",
           },
+          refreshParam,
         ],
         responses: {
           "200": {
@@ -741,13 +776,7 @@ const spec = {
             schema: { type: "integer", minimum: -12, maximum: 14 },
             example: 7,
           },
-          {
-            name: "refresh",
-            in: "query",
-            required: false,
-            description: "Set to 1 to bypass cache and force a fresh scrape",
-            schema: { type: "string", enum: ["1"] },
-          },
+          refreshParam,
           {
             name: "images",
             in: "query",

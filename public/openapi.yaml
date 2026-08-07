@@ -404,21 +404,13 @@ paths:
         '500':
           $ref: '#/components/responses/Error'
 
-  /latest:
+  /updated:
     get:
       tags: [Browse]
-      summary: Latest / popular anime listing
-      description: Paginated listing of latest-updated, new-release, or most-viewed anime.
-      operationId: getLatest
+      summary: Latest updated anime listing
+      description: Paginated listing of anime scraped directly from https://anikoto.net/latest-updated.
+      operationId: getUpdated
       parameters:
-        - name: type
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [latest-updated, new-release, most-viewed]
-            default: latest-updated
-          description: Listing type
         - name: page
           in: query
           required: false
@@ -427,6 +419,7 @@ paths:
             minimum: 1
             default: 1
           description: Page number
+        - $ref: '#/components/parameters/refresh'
       responses:
         '200':
           description: Listing results
@@ -444,6 +437,70 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/AnimeCard'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /widget:
+    get:
+      tags: [Browse]
+      summary: Home widgets data
+      description: Fetch dynamic home widgets: updated-all (default), updated-sub, updated-dub, trending, random.
+      operationId: getWidgetData
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+            default: updated-all
+            enum:
+              - updated-all
+              - updated-sub
+              - updated-dub
+              - trending
+              - random
+          description: Widget name (default: updated-all)
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: Widget data results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      results:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AnimeCard'
+                      currentPage:
+                        type: integer
+                        example: 1
+                      hasNextPage:
+                        type: boolean
+                        example: true
+                      hasPreviousPage:
+                        type: boolean
+                        example: false
+                      maxPage:
+                        type: integer
+                        example: 2
         '500':
           $ref: '#/components/responses/Error'
 
@@ -469,6 +526,7 @@ paths:
             minimum: 1
             default: 1
           description: Page number
+        - $ref: '#/components/parameters/refresh'
       responses:
         '200':
           description: Status listing
@@ -510,6 +568,7 @@ paths:
             minimum: 1
             default: 1
           description: Page number
+        - $ref: '#/components/parameters/refresh'
       responses:
         '200':
           description: Genre listing
@@ -552,6 +611,7 @@ paths:
             minimum: 1
             default: 1
           description: Page number
+        - $ref: '#/components/parameters/refresh'
       responses:
         '200':
           description: Type listing
@@ -697,7 +757,7 @@ components:
       required: false
       schema:
         type: string
-        enum: ["1"]
+        enum: ["0", "1"]
       description: Set to `1` to bypass cache and force a fresh scrape
 
   schemas:

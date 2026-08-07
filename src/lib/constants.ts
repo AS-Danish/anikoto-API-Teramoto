@@ -2,14 +2,26 @@ export const BASE_URL = process.env.BASE_URL || 'https://anikoto.net';
 
 export const DEFAULT_HEADERS = {
   'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 OPR/133.0.0.0',
   Accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+  'Accept-Language':
+    'en-US,en;q=0.9,id;q=0.8,ko;q=0.7,ja;q=0.6,ms;q=0.5,zh-CN;q=0.4,zh;q=0.3,fr;q=0.2,ar;q=0.1,ru;q=0.1',
   'Accept-Encoding': 'gzip, deflate, br',
   Connection: 'keep-alive',
-  'Cache-Control': 'no-cache',
-  Referer: 'https://anikoto.net/',
+  'Cache-Control': 'max-age=0',
+  Cookie: 'country_code=SG',
+  Priority: 'u=0, i',
+  Referer: 'https://anikoto.net/home',
+  'sec-ch-ua':
+    '"Opera GX";v="133", "Chromium";v="149", "Not)A;Brand";v="24"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'sec-fetch-dest': 'document',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-site': 'none',
+  'sec-fetch-user': '?1',
+  'upgrade-insecure-requests': '1',
 };
 
 /** Cache TTL in seconds */
@@ -26,14 +38,18 @@ export const FILTER_OPTIONS = {
   genres: [
     { id: "1", name: "Action", slug: "action" },
     { id: "2", name: "Adventure", slug: "adventure" },
+    { id: "2330", name: "Boys Love", slug: "boys-love" },
     { id: "538", name: "Cars", slug: "cars" },
     { id: "8", name: "Comedy", slug: "comedy" },
     { id: "453", name: "Dementia", slug: "dementia" },
     { id: "119", name: "Demons", slug: "demons" },
     { id: "62", name: "Drama", slug: "drama" },
     { id: "214", name: "Ecchi", slug: "ecchi" },
+    { id: "2322", name: "Erotica", slug: "erotica" },
     { id: "3", name: "Fantasy", slug: "fantasy" },
     { id: "180", name: "Game", slug: "game" },
+    { id: "2328", name: "Girls Love", slug: "girls-love" },
+    { id: "2326", name: "Gourmet", slug: "gourmet" },
     { id: "215", name: "Harem", slug: "harem" },
     { id: "70", name: "Historical", slug: "historical" },
     { id: "222", name: "Horror", slug: "horror" },
@@ -41,6 +57,7 @@ export const FILTER_OPTIONS = {
     { id: "404", name: "Josei", slug: "josei" },
     { id: "46", name: "Kids", slug: "kids" },
     { id: "203", name: "Magic", slug: "magic" },
+    { id: "2310", name: "Mahou Shoujo", slug: "mahou-shoujo" },
     { id: "114", name: "Martial Arts", slug: "martial-arts" },
     { id: "123", name: "Mecha", slug: "mecha" },
     { id: "125", name: "Military", slug: "military" },
@@ -63,6 +80,7 @@ export const FILTER_OPTIONS = {
     { id: "29", name: "Sports", slug: "sports" },
     { id: "16", name: "Super Power", slug: "super-power" },
     { id: "9", name: "Supernatural", slug: "supernatural" },
+    { id: "2316", name: "Suspense", slug: "suspense" },
     { id: "54", name: "Thriller", slug: "thriller" },
     { id: "32", name: "unknown", slug: "unknown" },
     { id: "58", name: "Vampire", slug: "vampire" }

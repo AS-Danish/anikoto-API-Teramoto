@@ -32,9 +32,12 @@ export async function GET(req: Request) {
     }
 
     const key = `search:${keyword.toLowerCase()}:page:${page}`;
-    const data = refresh
-      ? await scrapeSearch(keyword, page)
-      : await getOrSet(key, () => scrapeSearch(keyword, page), CACHE_TTL.SEARCH);
+    const data = await getOrSet(
+      key,
+      () => scrapeSearch(keyword, page, refresh),
+      CACHE_TTL.SEARCH,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

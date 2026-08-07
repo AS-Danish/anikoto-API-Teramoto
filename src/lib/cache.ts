@@ -20,14 +20,17 @@ const inFlight = new Map<string, Promise<unknown>>();
 export async function getOrSet<T>(
   key: string,
   fetcher: () => Promise<T>,
-  ttl: number
+  ttl: number,
+  refresh = false
 ): Promise<T> {
-  const cached = cache.get<T>(key);
-  if (cached !== undefined) return cached;
+  if (!refresh) {
+    const cached = cache.get<T>(key);
+    if (cached !== undefined) return cached;
 
-  // If there's already an in-flight fetch for this key, wait for it
-  const existing = inFlight.get(key);
-  if (existing) return existing as Promise<T>;
+    // If there's already an in-flight fetch for this key, wait for it
+    const existing = inFlight.get(key);
+    if (existing) return existing as Promise<T>;
+  }
 
   const promise = fetcher().then((fresh) => {
     cache.set(key, fresh, ttl);

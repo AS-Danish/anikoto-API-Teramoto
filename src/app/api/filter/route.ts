@@ -52,13 +52,23 @@ export async function GET(req: Request) {
     const cacheKey = `filter:${JSON.stringify(params)}`;
     const refresh = searchParams.get('refresh') === '1';
 
-    const data = refresh
-      ? await scrapeFilter(params)
-      : await getOrSet(cacheKey, () => scrapeFilter(params), CACHE_TTL.FILTER);
+    const data = await getOrSet(
+      cacheKey,
+      () => scrapeFilter(params, refresh),
+      CACHE_TTL.FILTER,
+      refresh
+    );
 
     data.options = FILTER_OPTIONS;
 
-    return NextResponse.json({ ok: true, data });
+    return NextResponse.json(
+      { ok: true, data },
+      {
+        headers: refresh
+          ? { 'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate' }
+          : undefined,
+      }
+    );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[GET /api/filter]', message);

@@ -42,9 +42,12 @@ export async function GET(req: Request) {
     const key = `status:${type}:${page}`;
     const path = STATUS_PATHS[type];
 
-    const data = refresh
-      ? await scrapeListingPage(path, page)
-      : await getOrSet(key, () => scrapeListingPage(path, page), CACHE_TTL.FILTER);
+    const data = await getOrSet(
+      key,
+      () => scrapeListingPage(path, page, refresh),
+      CACHE_TTL.FILTER,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

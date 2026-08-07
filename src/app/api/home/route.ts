@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { scrapeHome } from '@/lib/scrapers/home.scraper';
+import { scrapeHome, scrapeHomeWidget } from '@/lib/scrapers/home.scraper';
 import { getOrSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
 
@@ -21,11 +21,27 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const refresh = searchParams.get('refresh') === '1';
+    const widget = searchParams.get('widget');
+    const page = parseInt(searchParams.get('page') ?? '1', 10);
+
+    if (widget) {
+      const key = `home:widget:${widget}:${page}`;
+      const data = await getOrSet(
+        key,
+        () => scrapeHomeWidget(widget, page),
+        CACHE_TTL.HOME,
+        refresh
+      );
+      return NextResponse.json({ ok: true, data });
+    }
 
     const key = 'home';
-    const data = refresh
-      ? await scrapeHome()
-      : await getOrSet(key, scrapeHome, CACHE_TTL.HOME);
+    const data = await getOrSet(
+      key,
+      () => scrapeHome(refresh),
+      CACHE_TTL.HOME,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

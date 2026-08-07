@@ -37,9 +37,12 @@ export async function GET(
     const key = `genre:${genre}:${page}`;
     const path = `/genre/${genre}`;
 
-    const data = refresh
-      ? await scrapeListingPage(path, page)
-      : await getOrSet(key, () => scrapeListingPage(path, page), CACHE_TTL.FILTER);
+    const data = await getOrSet(
+      key,
+      () => scrapeListingPage(path, page, refresh),
+      CACHE_TTL.FILTER,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data: { ...data, genre } });
   } catch (err: unknown) {

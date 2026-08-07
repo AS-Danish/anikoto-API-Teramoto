@@ -102,7 +102,7 @@ async function _doMegacloud(
       ...DEFAULT_HEADERS,
       Accept: '*/*',
       'X-Requested-With': 'XMLHttpRequest',
-      Referer: referer,
+      Referer: embedUrl, // Fix: Referer of getSources must be embedUrl
     },
     timeout: 5000,
   });
@@ -116,8 +116,10 @@ async function _doMegacloud(
     ? { start: data.outro.start, end: data.outro.end }
     : undefined;
 
+  const streamReferer = origin + '/'; // Referer for CDN stream is megacloud.tv origin
+
   if (!data.encrypted || data.sources?.[0]?.file.includes('.m3u8')) {
-    return data.sources?.[0]?.file ? { m3u8: data.sources[0].file, referer, tracks, intro, outro } : null;
+    return data.sources?.[0]?.file ? { m3u8: data.sources[0].file, referer: streamReferer, tracks, intro, outro } : null;
   }
 
   const keys = await getMegacloudKeys();
@@ -134,7 +136,7 @@ async function _doMegacloud(
   const m3u8 = (typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted)).match(
     /"file":"(.*?)"/
   )?.[1];
-  return m3u8 ? { m3u8, referer, tracks, intro, outro } : null;
+  return m3u8 ? { m3u8, referer: streamReferer, tracks, intro, outro } : null;
 }
 
 export async function extractVidstream(
@@ -142,8 +144,13 @@ export async function extractVidstream(
   referer: string
 ): Promise<ExtractedStream | null> {
   try {
+    let parentOrigin = referer;
+    try {
+      parentOrigin = new URL(referer).origin + '/';
+    } catch (_) {}
+
     const { data: html } = await axios.get<string>(embedUrl, {
-      headers: { ...DEFAULT_HEADERS, Referer: referer },
+      headers: { ...DEFAULT_HEADERS, Referer: parentOrigin },
       timeout: 8000,
     });
 
@@ -159,7 +166,7 @@ export async function extractVidstream(
 
     const saveDataUrl = `${domain2}/save_data.php?id=${epId}-${epType}`;
     const { data } = await axios.get(saveDataUrl, {
-      headers: { ...DEFAULT_HEADERS, Referer: referer },
+      headers: { ...DEFAULT_HEADERS, Referer: embedUrl }, // Fix: Referer of save_data.php must be embedUrl
       timeout: 8000,
     });
 
@@ -191,22 +198,33 @@ export async function extractMegaplay(embedUrl: string): Promise<ExtractedStream
   }
 }
 
-export async function extractMegacloud(embedUrl: string): Promise<ExtractedStream | null> {
+export async function extractMegacloud(
+  embedUrl: string,
+  parentReferer?: string
+): Promise<ExtractedStream | null> {
   try {
     const origin = new URL(embedUrl).origin;
-    const referer = origin + '/';
+    let referer = origin + '/';
+    if (parentReferer) {
+      try {
+        referer = new URL(parentReferer).origin + '/';
+      } catch (_) {}
+    }
     const { data: html } = await axios.get<string>(embedUrl, {
       headers: { ...DEFAULT_HEADERS, Referer: referer },
       timeout: 5000,
     });
-    return await _doMegacloud(embedUrl, html, referer);
+    return await _doMegacloud(embedUrl, html, embedUrl); // Use embedUrl as the referer for getSources!
   } catch (err) {
     console.error('Megacloud extraction failed:', err);
     return null;
   }
 }
 
-export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStream | null> {
+export async function extractStreamUrl(
+  embedUrl: string,
+  parentReferer?: string
+): Promise<ExtractedStream | null> {
   const hostname = new URL(embedUrl).hostname;
 
   if (
@@ -221,7 +239,7 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
   }
 
   if (hostname.includes('megacloud.blog')) {
-    return extractMegacloud(embedUrl);
+    return extractMegacloud(embedUrl, parentReferer);
   }
 
   if (hostname.includes('vidtube.site')) {
@@ -235,6 +253,11 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
     try {
       let host = new URL(currentUrl).host;
       let referer = 'https://' + host + '/';
+      if (parentReferer) {
+        try {
+          referer = new URL(parentReferer).origin + '/';
+        } catch (_) {}
+      }
       let response;
 
       try {
@@ -249,6 +272,11 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
             .replace('megacloud.bloggy.click', 'megaplay.buzz');
           host = new URL(fallbackUrl).host;
           referer = 'https://' + host + '/';
+          if (parentReferer) {
+            try {
+              referer = new URL(parentReferer).origin + '/';
+            } catch (_) {}
+          }
           response = await axios.get<string>(fallbackUrl, {
             headers: { ...DEFAULT_HEADERS, Referer: referer },
             timeout: 5000,
@@ -274,6 +302,11 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
           .replace('megacloud.bloggy.click', 'megaplay.buzz');
         host = new URL(fallbackUrl).host;
         referer = 'https://' + host + '/';
+        if (parentReferer) {
+          try {
+            referer = new URL(parentReferer).origin + '/';
+          } catch (_) {}
+        }
         response = await axios.get<string>(fallbackUrl, {
           headers: { ...DEFAULT_HEADERS, Referer: referer },
           timeout: 5000,
@@ -302,7 +335,7 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
         return await _doMegaplay(new URL(currentUrl).host, html, finalReferer);
       }
       if (finalHost.includes('megacloud.blog')) {
-        return await _doMegacloud(currentUrl, html, finalReferer);
+        return await _doMegacloud(currentUrl, html, currentUrl); // Use currentUrl as referer for getSources!
       }
 
       return null;

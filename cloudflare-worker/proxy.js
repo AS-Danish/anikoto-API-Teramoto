@@ -1,15 +1,3 @@
-/* eslint-disable */
-/**
- * Anikoto Proxy — Cloudflare Worker
- *
- * Proxies ALL HLS requests (manifests, segments, subtitles) with Referer spoofing.
- * CF Workers free tier: 100K req/day, UNLIMITED bandwidth — safe for video proxying.
- *
- * Routes:
- *  GET /?url=<encoded>&referer=<encoded>   — proxy the target URL
- *  OPTIONS                                  — CORS preflight
- */
-
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
 
@@ -48,7 +36,7 @@ export default {
       upstreamHeaders['Referer'] = referer;
       try {
         upstreamHeaders['Origin'] = new URL(referer).origin;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // Forward Range header for video seeking support
@@ -106,7 +94,21 @@ export default {
           if (line.includes('URI=')) {
             line = line.replace(/URI=["']([^"']+)["']/g, (match, uri) => {
               try {
-                const abs = uri.startsWith('http') ? uri : new URL(uri, target).toString();
+                let abs = uri.startsWith('http') ? uri : new URL(uri, target).toString();
+
+                try {
+                  const parsedUri = new URL(abs);
+                  if (
+                    parsedUri.hostname.endsWith('.buzz') ||
+                    parsedUri.hostname.endsWith('.click') ||
+                    parsedUri.hostname.includes('zaplume.buzz') ||
+                    parsedUri.hostname.includes('mewstream.buzz')
+                  ) {
+                    parsedUri.host = new URL(target).host;
+                    abs = parsedUri.toString();
+                  }
+                } catch (_) { }
+
                 let proxied = `${workerBase}/?url=${encodeURIComponent(abs)}`;
                 if (referer) proxied += `&referer=${encodeURIComponent(referer)}`;
                 return `URI="${proxied}"`;
@@ -121,7 +123,21 @@ export default {
 
           // Segment / sub-playlist lines
           try {
-            const resolved = new URL(trimmed, target).toString();
+            let resolved = new URL(trimmed, target).toString();
+
+            try {
+              const parsedUri = new URL(resolved);
+              if (
+                parsedUri.hostname.endsWith('.buzz') ||
+                parsedUri.hostname.endsWith('.click') ||
+                parsedUri.hostname.includes('zaplume.buzz') ||
+                parsedUri.hostname.includes('mewstream.buzz')
+              ) {
+                parsedUri.host = new URL(target).host;
+                resolved = parsedUri.toString();
+              }
+            } catch (_) { }
+
             let proxied = `${workerBase}/?url=${encodeURIComponent(resolved)}`;
             if (referer) proxied += `&referer=${encodeURIComponent(referer)}`;
             return proxied;

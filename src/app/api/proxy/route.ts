@@ -97,6 +97,19 @@ export async function GET(req: Request) {
             let keyUrl = uri;
             if (!keyUrl.startsWith('http')) {
               keyUrl = new URL(keyUrl, baseUrl).toString();
+            } else {
+              try {
+                const parsedKey = new URL(keyUrl);
+                if (
+                  parsedKey.hostname.endsWith('.buzz') ||
+                  parsedKey.hostname.endsWith('.click') ||
+                  parsedKey.hostname.includes('zaplume.buzz') ||
+                  parsedKey.hostname.includes('mewstream.buzz')
+                ) {
+                  parsedKey.host = baseUrl.host;
+                  keyUrl = parsedKey.toString();
+                }
+              } catch (_) { }
             }
             const proxied = `/api/proxy?url=${encodeURIComponent(keyUrl)}&referer=${encodeURIComponent(referer || '')}`;
             return `URI="${proxied}"`;
@@ -109,6 +122,19 @@ export async function GET(req: Request) {
         let segmentUrl = line.trim();
         if (!segmentUrl.startsWith('http')) {
           segmentUrl = new URL(segmentUrl, baseUrl).toString();
+        } else {
+          try {
+            const parsedSeg = new URL(segmentUrl);
+            if (
+              parsedSeg.hostname.endsWith('.buzz') ||
+              parsedSeg.hostname.endsWith('.click') ||
+              parsedSeg.hostname.includes('zaplume.buzz') ||
+              parsedSeg.hostname.includes('mewstream.buzz')
+            ) {
+              parsedSeg.host = baseUrl.host;
+              segmentUrl = parsedSeg.toString();
+            }
+          } catch (_) { }
         }
 
         // Return the proxied URL

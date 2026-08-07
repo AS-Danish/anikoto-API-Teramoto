@@ -57,11 +57,11 @@ function parseAnimeGrid($: cheerio.CheerioAPI, selector: string, excludeSidebar 
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 
-export async function scrapeSearch(keyword: string, page = 1): Promise<SearchResult> {
+export async function scrapeSearch(keyword: string, page = 1, refresh?: boolean): Promise<SearchResult> {
   const url = page > 1 
     ? `/filter?keyword=${encodeURIComponent(keyword)}&page=${page}`
     : `/filter?keyword=${encodeURIComponent(keyword)}`;
-  const $ = await fetchPage(url);
+  const $ = await fetchPage(url, undefined, refresh);
   const results = parseAnimeGrid($, '.items.flw-wrap .film_list-wrap .flw-item, .film_list-wrap .flw-item, .ani.items .item, section .items .item', true);
   
   const currentPage = page;
@@ -94,8 +94,6 @@ export async function scrapeSearch(keyword: string, page = 1): Promise<SearchRes
 function buildFilterUrl(params: FilterParams): string {
   const qs = new URLSearchParams();
   if (params.keyword) qs.set('keyword', params.keyword);
-  // Anikoto TV uses hidden type="" and actual type is in term_type[]
-  qs.set('type', '');
   if (params.genre?.length) params.genre.forEach((g) => qs.append('genre[]', g));
   if (params.season?.length) params.season.forEach((s) => qs.append('season[]', s));
   if (params.year?.length) params.year.forEach((y) => qs.append('year[]', y));
@@ -108,8 +106,8 @@ function buildFilterUrl(params: FilterParams): string {
   return `/filter?${qs.toString()}`;
 }
 
-export async function scrapeFilter(params: FilterParams): Promise<FilterResult> {
-  const $ = await fetchPage(buildFilterUrl(params));
+export async function scrapeFilter(params: FilterParams, refresh?: boolean): Promise<FilterResult> {
+  const $ = await fetchPage(buildFilterUrl(params), undefined, refresh);
 
   // Try multiple selectors since the site may vary
   const results = parseAnimeGrid(
@@ -162,10 +160,11 @@ export async function scrapeFilter(params: FilterParams): Promise<FilterResult> 
 
 export async function scrapeListingPage(
   path: string,
-  page = 1
+  page = 1,
+  refresh?: boolean
 ): Promise<{ results: AnimeCard[]; topRated?: AnimeCard[]; currentPage: number; hasNextPage: boolean; hasPreviousPage: boolean; minPage?: number; maxPage?: number }> {
-  const url = page > 1 ? `${path}?page=${page}` : path;
-  const $ = await fetchPage(url);
+  const url = page > 1 ? (path.includes('?') ? `${path}&page=${page}` : `${path}?page=${page}`) : path;
+  const $ = await fetchPage(url, undefined, refresh);
 
   const results = parseAnimeGrid(
     $,

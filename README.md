@@ -67,7 +67,8 @@ Open [http://localhost:3000](http://localhost:3000) to see the interactive API d
 | GET | `/api/anime/:slug/related` | Related anime (watch order/sequels/prequels) |
 | GET | `/api/anime/:slug/recommendations` | Recommended anime list (cards) |
 | GET | `/api/anime/tooltip/:id` | Anime tooltip / preview info (by poster's `data-tip` ID) |
-| GET | `/api/latest?type=&page=` | Paginated listings: `latest-updated`, `new-release`, `most-viewed` (returns `results` & optional `topRated`) |
+| GET | `/api/updated?page=` | Paginated latest updated anime listing directly from `https://anikoto.net/latest-updated` (returns `results` & optional `topRated`) |
+| GET | `/api/widget?name=&page=` | Home AJAX widgets: `updated-all`, `updated-sub`, `updated-dub`, `trending`, `random` |
 | GET | `/api/status?type=&page=` | Airing status listing: `currently-airing`, `finished-airing`, `not-yet-aired` (returns `results` & optional `topRated`) |
 | GET | `/api/genre/:genre?page=` | Browse by genre slug (returns `results` & optional `topRated`) |
 | GET | `/api/type/:type?page=` | Browse by media type: `tv`, `movie`, `ova`, `ona`, `special`, `music` (returns `results` & optional `topRated`) |
@@ -97,6 +98,26 @@ Add `?refresh=1` to force a fresh scrape.
 
 ---
 
+---
+
+## ⚙️ Environment Variables
+
+Configure environment variables in a `.env` file at the root directory:
+
+```env
+# Target base URL (default: https://anikoto.net)
+BASE_URL=https://anikoto.net
+
+# Optional: CORS allowed origins (default: "*")
+# Supports single origin, comma-separated list, or wildcard "*"
+CORS_ALLOWED_ORIGIN=http://localhost:3000,https://your-app.vercel.app
+
+# Optional: Cloudflare Worker URL for streaming proxy
+CF_WORKER_URL=https://your-worker-name.workers.dev
+```
+
+---
+
 ## ☁️ Cloudflare Worker Proxy (Optional)
 
 By default, the API provides an internal streaming proxy at `/api/proxy` to bypass CORS. For better performance and free unlimited bandwidth (100k req/day free tier), you can deploy the included Cloudflare Worker and configure the API to use it automatically.
@@ -119,6 +140,7 @@ By default, the API provides an internal streaming proxy at `/api/proxy` to bypa
 
 ```
 src/
+├── proxy.ts              # CORS & proxy middleware (Next.js 16)
 ├── app/
 │   ├── page.tsx          # Swagger UI documentation page
 │   ├── layout.tsx        # Root layout
@@ -128,14 +150,13 @@ src/
 │       ├── filter/       # GET /api/filter
 │       ├── anime/        # GET /api/anime/:slug (+ /episodes)
 │       │   └── tooltip/  # GET /api/anime/tooltip/:id
-│       ├── latest/       # GET /api/latest
+│       ├── updated/      # GET /api/updated
 │       ├── status/       # GET /api/status
 │       ├── genre/        # GET /api/genre/:genre
 │       ├── type/         # GET /api/type/:type
 │       ├── schedule/     # GET /api/schedule
 │       ├── watch/        # GET /api/watch/:slug
-│       ├── proxy/        # GET /api/proxy
-│       └── sources/      # Streaming source resolvers
+│       └── proxy/        # GET /api/proxy
 ├── lib/
 │   ├── types.ts          # TypeScript interfaces
 │   ├── constants.ts      # Base URL, cache TTLs, filter options

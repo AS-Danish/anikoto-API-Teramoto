@@ -42,9 +42,12 @@ export async function GET(
     const key = `type:${type}:${page}`;
     const path = `/type/${type.toLowerCase()}`;
 
-    const data = refresh
-      ? await scrapeListingPage(path, page)
-      : await getOrSet(key, () => scrapeListingPage(path, page), CACHE_TTL.FILTER);
+    const data = await getOrSet(
+      key,
+      () => scrapeListingPage(path, page, refresh),
+      CACHE_TTL.FILTER,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data: { ...data, mediaType: type } });
   } catch (err: unknown) {

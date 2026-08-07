@@ -25,9 +25,12 @@ export async function GET(
 
     const cacheKey = `anime:related:api:${slug}`;
 
-    const data = refresh
-      ? await scrapeRelatedAnime(slug, true)
-      : await getOrSet(cacheKey, () => scrapeRelatedAnime(slug), CACHE_TTL.ANIME);
+    const data = await getOrSet(
+      cacheKey,
+      () => scrapeRelatedAnime(slug, refresh),
+      CACHE_TTL.ANIME,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

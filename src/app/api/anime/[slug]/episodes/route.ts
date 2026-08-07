@@ -47,9 +47,12 @@ export async function GET(
       }
     }
 
-    const data = refresh
-      ? await scrapeAnimeEpisodes(slug, startEpisode, endEpisode)
-      : await getOrSet(cacheKey, () => scrapeAnimeEpisodes(slug, startEpisode, endEpisode), CACHE_TTL.EPISODE);
+    const data = await getOrSet(
+      cacheKey,
+      () => scrapeAnimeEpisodes(slug, startEpisode, endEpisode, refresh),
+      CACHE_TTL.EPISODE,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

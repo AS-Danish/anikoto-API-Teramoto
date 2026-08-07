@@ -28,9 +28,12 @@ export async function GET(
 
     const key = `anime:tooltip:${id}`;
 
-    const data = refresh
-      ? await scrapeAnimeTooltip(id)
-      : await getOrSet(key, () => scrapeAnimeTooltip(id), CACHE_TTL.ANIME);
+    const data = await getOrSet(
+      key,
+      () => scrapeAnimeTooltip(id),
+      CACHE_TTL.ANIME,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

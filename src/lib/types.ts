@@ -73,6 +73,27 @@ export interface TopAnimeItem {
   episodes: EpisodeStatus;
 }
 
+export interface LatestWidgetComment {
+  id: string;
+  user: string;
+  badge?: string;
+  avatar?: string;
+  time?: string;
+  episode?: string;
+  text?: string;
+  showTitle?: string;
+  slug?: string;
+  watchHref?: string;
+}
+
+export interface HomeWidgetResult {
+  results: LatestEpisodeItem[];
+  currentPage: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  maxPage?: number;
+}
+
 export interface HomeData {
   spotlight: SpotlightAnime[];
   latestEpisodes: LatestEpisodeItem[];

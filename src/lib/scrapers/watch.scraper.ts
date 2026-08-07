@@ -174,7 +174,7 @@ function buildSourceTasks(
                   if (!res) throw new Error('No result');
                   return res;
                 }),
-                extractStreamUrl(embedUrl).then((res) => {
+                extractStreamUrl(embedUrl, epReferer).then((res) => {
                   if (!res) throw new Error('No result');
                   return res;
                 }),
@@ -183,7 +183,7 @@ function buildSourceTasks(
               extracted = null;
             }
           } else {
-            extracted = await extractStreamUrl(embedUrl);
+            extracted = await extractStreamUrl(embedUrl, epReferer);
           }
 
           const source: VideoSource = {

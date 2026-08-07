@@ -61,9 +61,12 @@ export async function GET(
     const rangeSuffix = startEpisode !== undefined ? `:ep${startEpisode}-${endEpisode}` : '';
     const key = `anime:${slug}${rangeSuffix}`;
 
-    const data = refresh
-      ? await fetchAndCombine(slug, startEpisode, endEpisode, true)
-      : await getOrSet(key, () => fetchAndCombine(slug, startEpisode, endEpisode), CACHE_TTL.ANIME);
+    const data = await getOrSet(
+      key,
+      () => fetchAndCombine(slug, startEpisode, endEpisode, refresh),
+      CACHE_TTL.ANIME,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {

@@ -25,9 +25,12 @@ export async function GET(
 
     const cacheKey = `anime:recommendations:api:${slug}`;
 
-    const data = refresh
-      ? await scrapeRecommendations(slug, true)
-      : await getOrSet(cacheKey, () => scrapeRecommendations(slug), CACHE_TTL.ANIME);
+    const data = await getOrSet(
+      cacheKey,
+      () => scrapeRecommendations(slug, refresh),
+      CACHE_TTL.ANIME,
+      refresh
+    );
 
     return NextResponse.json({ ok: true, data });
   } catch (err: unknown) {
