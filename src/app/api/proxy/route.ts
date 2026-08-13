@@ -13,6 +13,11 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, message: 'Missing url parameter' }, { status: 400 });
   }
 
+  // Get the absolute base URL dynamically so native video players can resolve the chunks
+  const host = req.headers.get('host');
+  const protocol = req.headers.get('x-forwarded-proto') || 'https';
+  const proxyBaseUrl = host ? `${protocol}://${host}` : '';
+
   const headers: Record<string, string> = {
     'User-Agent': DEFAULT_HEADERS['User-Agent'],
     'Accept': '*/*',
@@ -111,7 +116,7 @@ export async function GET(req: Request) {
                 }
               } catch (_) { }
             }
-            const proxied = `/api/proxy?url=${encodeURIComponent(keyUrl)}&referer=${encodeURIComponent(referer || '')}`;
+            const proxied = `${proxyBaseUrl}/api/proxy?url=${encodeURIComponent(keyUrl)}&referer=${encodeURIComponent(referer || '')}`;
             return `URI="${proxied}"`;
           });
         }
@@ -137,8 +142,8 @@ export async function GET(req: Request) {
           } catch (_) { }
         }
 
-        // Return the proxied URL
-        return `/api/proxy?url=${encodeURIComponent(segmentUrl)}&referer=${encodeURIComponent(referer || '')}`;
+        // Return the proxied URL with the absolute base domain so native apps can resolve it
+        return `${proxyBaseUrl}/api/proxy?url=${encodeURIComponent(segmentUrl)}&referer=${encodeURIComponent(referer || '')}`;
       }).join('\n');
 
       responseData = Buffer.from(rewrittenText, 'utf-8');
