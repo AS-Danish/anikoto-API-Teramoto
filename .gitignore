@@ -48,3 +48,6 @@ extractor.js
 test_episodes.js
 test_schedule.js
 /test/
+
+.env
+.env.*
