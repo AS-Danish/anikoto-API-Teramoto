@@ -41,8 +41,6 @@ export async function getAnilistAnime(slug: string) {
     const media = res.data?.data?.Media;
     if (!media) throw new Error('Not found on Anilist');
 
-    const getProxyUrl = makeProxyHelper();
-    const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";
     return {
       id: String(media.id),
       slug: slug,
@@ -89,6 +87,9 @@ export async function getAnilistWatch(slug: string, epNum: string) {
 
     const watchRes = await axios.get(`${GOGOANIME_CONSUMET_URL}/watch/${episode.id}`);
     
+    const getProxyUrl = makeProxyHelper();
+    const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";
+
     return {
       stream: {
         sources: (watchRes.data.sources || []).map((s: any) => ({

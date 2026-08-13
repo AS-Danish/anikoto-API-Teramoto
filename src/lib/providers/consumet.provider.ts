@@ -66,6 +66,7 @@ export async function getConsumetWatch(slug: string, epNum: string) {
     
     const getProxyUrl = makeProxyHelper();
     const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";
+
     // Format to match Anikoto Watch JSON
     return {
       stream: {

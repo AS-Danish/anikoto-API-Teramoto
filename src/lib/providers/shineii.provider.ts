@@ -14,8 +14,7 @@ export async function getShineiiAnime(slug: string) {
       const data = res.data.results;
       
       // Map Shineii's fields back to our Next.js expected format if necessary
-      const getProxyUrl = makeProxyHelper();
-    return {
+      return {
         id: data.animeId ? String(data.animeId) : data.id,
         slug: slug,
         title: data.title,
@@ -73,6 +72,8 @@ export async function getShineiiWatch(slug: string, epNum: string) {
     }
     
     const streamData = streamRes.data.results;
+    
+    const getProxyUrl = makeProxyHelper();
 
     // Format back to Anikoto Next.js JSON format
     return {
@@ -83,7 +84,11 @@ export async function getShineiiWatch(slug: string, epNum: string) {
       servers: servers,
       stream: {
         sources: [
-          { url: streamData.url, quality: 'auto' }
+          { 
+            url: streamData.url, 
+            quality: 'auto',
+            proxyUrl: getProxyUrl(streamData.url)
+          }
         ],
         subtitles: streamData.subtitles || [],
       }
@@ -92,4 +97,3 @@ export async function getShineiiWatch(slug: string, epNum: string) {
     throw new Error('Shineii API watch fetch failed');
   }
 }
-
