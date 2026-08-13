@@ -1,4 +1,5 @@
-import { scrapeWatchStream, scrapeWatch, WatchData } from '@/lib/scrapers/watch.scraper';
+import { scrapeWatchStream, WatchData } from '@/lib/scrapers/watch.scraper';
+import { waterfallWatch } from '@/lib/providers/waterfall';
 import { cacheGet, cacheSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
 
@@ -48,7 +49,7 @@ export async function GET(
 
     // ── Non-streaming response: wait for all chunks and return JSON ──────────
     if (!isStream) {
-      const data = await scrapeWatch(slug, epNum);
+      const data = await waterfallWatch(slug, epNum);
       cacheSet(cacheKey, data, CACHE_TTL.EPISODE);
       return Response.json({ ok: true, data, streaming: false });
     }

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { scrapeAnimeDetail, scrapeAnimeEpisodes } from '@/lib/scrapers/anime.scraper';
+import { waterfallAnimeDetail } from '@/lib/providers/waterfall';
 import { getOrSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
 
@@ -63,7 +63,7 @@ export async function GET(
 
     const data = await getOrSet(
       key,
-      () => fetchAndCombine(slug, startEpisode, endEpisode, refresh),
+      () => waterfallAnimeDetail(slug, startEpisode, endEpisode, refresh),
       CACHE_TTL.ANIME,
       refresh
     );
@@ -76,13 +76,4 @@ export async function GET(
   }
 }
 
-/**
- * Fetch anime detail and episodes in parallel.
- */
-async function fetchAndCombine(slug: string, startEpisode?: number, endEpisode?: number, refresh?: boolean) {
-  const [episodes, detail] = await Promise.all([
-    scrapeAnimeEpisodes(slug, startEpisode, endEpisode, refresh),
-    scrapeAnimeDetail(slug, refresh),
-  ]);
-  return { ...detail, episodes };
-}
+
