@@ -1,3 +1,4 @@
+import { makeProxyHelper } from '../scrapers/watch.scraper';
 import axios from 'axios';
 
 // Ensure you set this in your Vercel Environment Variables later
@@ -13,7 +14,8 @@ export async function getShineiiAnime(slug: string) {
       const data = res.data.results;
       
       // Map Shineii's fields back to our Next.js expected format if necessary
-      return {
+      const getProxyUrl = makeProxyHelper();
+    return {
         id: data.animeId ? String(data.animeId) : data.id,
         slug: slug,
         title: data.title,

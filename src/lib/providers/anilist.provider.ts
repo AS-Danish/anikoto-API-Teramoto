@@ -1,3 +1,4 @@
+import { makeProxyHelper } from '../scrapers/watch.scraper';
 import axios from 'axios';
 
 const ANILIST_API_URL = 'https://graphql.anilist.co';
@@ -40,6 +41,8 @@ export async function getAnilistAnime(slug: string) {
     const media = res.data?.data?.Media;
     if (!media) throw new Error('Not found on Anilist');
 
+    const getProxyUrl = makeProxyHelper();
+    const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";
     return {
       id: String(media.id),
       slug: slug,
@@ -90,7 +93,8 @@ export async function getAnilistWatch(slug: string, epNum: string) {
       stream: {
         sources: (watchRes.data.sources || []).map((s: any) => ({
           url: s.url,
-          quality: s.quality || 'auto'
+          quality: s.quality || 'auto',
+          proxyUrl: getProxyUrl(s.url, referer)
         })),
         subtitles: [],
       }

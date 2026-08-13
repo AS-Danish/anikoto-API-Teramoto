@@ -89,7 +89,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
-function makeProxyHelper() {
+export function makeProxyHelper() {
   const rawBaseUrl = process.env.NEXT_PUBLIC_CF_WORKER_URL || process.env.CF_WORKER_URL || '/api/proxy';
   let proxyBase = rawBaseUrl.trim();
   if (proxyBase && !proxyBase.startsWith('http') && !proxyBase.startsWith('/')) {

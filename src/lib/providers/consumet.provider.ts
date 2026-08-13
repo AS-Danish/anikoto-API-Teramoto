@@ -1,3 +1,4 @@
+import { makeProxyHelper } from '../scrapers/watch.scraper';
 import axios from 'axios';
 
 // Public Consumet instance for Gogoanime
@@ -63,12 +64,15 @@ export async function getConsumetWatch(slug: string, epNum: string) {
 
     const watchRes = await axios.get(`${CONSUMET_URL}/watch/${episode.id}`);
     
+    const getProxyUrl = makeProxyHelper();
+    const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";
     // Format to match Anikoto Watch JSON
     return {
       stream: {
         sources: (watchRes.data.sources || []).map((s: any) => ({
           url: s.url,
-          quality: s.quality || 'auto'
+          quality: s.quality || 'auto',
+          proxyUrl: getProxyUrl(s.url, referer)
         })),
         subtitles: [],
         intro: watchRes.data.intro || undefined,
