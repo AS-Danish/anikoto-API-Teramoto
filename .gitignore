@@ -30,9 +30,6 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env
-
 # vercel
 .vercel
 
@@ -51,3 +48,6 @@ test_schedule.js
 
 .env
 .env.*
+/cloudflare-worker/.dev.vars
+/cloudflare-worker/.dev.vars.*
+!/cloudflare-worker/.dev.vars.example

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { BASE_URL, DEFAULT_HEADERS } from './constants';
-import cache, { getOrSet } from './cache';
+import cache, { getOrSet, withUpstreamLimit } from './cache';
 
 /**
  * Fetch an HTML page from anikototv.to and return a Cheerio instance.
@@ -24,14 +24,14 @@ export async function fetchPage(
       if (refresh) {
         url += url.includes('?') ? `&_t=${Date.now()}` : `?_t=${Date.now()}`;
       }
-      const { data } = await axios.get(url, {
-        headers: {
-          ...DEFAULT_HEADERS,
-          ...(refresh ? { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache' } : {}),
-          ...extraHeaders,
-        },
-        timeout: 15_000,
-      });
+      const { data } = await withUpstreamLimit(() => axios.get(url, {
+          headers: {
+            ...DEFAULT_HEADERS,
+            ...(refresh ? { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache' } : {}),
+            ...extraHeaders,
+          },
+          timeout: 15_000,
+        }));
       return data as string;
     },
     300,
@@ -54,15 +54,15 @@ export async function fetchJson<T = unknown>(
   if (refresh) {
     url += url.includes('?') ? `&_t=${Date.now()}` : `?_t=${Date.now()}`;
   }
-  const { data } = await axios.get<T>(url, {
-    headers: {
-      ...DEFAULT_HEADERS,
-      Accept: 'application/json, text/javascript, */*',
-      'X-Requested-With': 'XMLHttpRequest',
-      ...(refresh ? { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache' } : {}),
-      ...extraHeaders,
-    },
-    timeout: 15_000,
-  });
+  const { data } = await withUpstreamLimit(() => axios.get<T>(url, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        Accept: 'application/json, text/javascript, */*',
+        'X-Requested-With': 'XMLHttpRequest',
+        ...(refresh ? { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache' } : {}),
+        ...extraHeaders,
+      },
+      timeout: 15_000,
+    }));
   return data;
 }

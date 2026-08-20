@@ -1,0 +1,5 @@
+# Copy this file to .dev.vars for `wrangler dev` and use the same value as the API.
+PROXY_SIGNING_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+
+# Optional during a zero-downtime secret rotation.
+PROXY_SIGNING_SECRET_PREVIOUS=

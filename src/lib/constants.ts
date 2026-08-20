@@ -9,7 +9,6 @@ export const DEFAULT_HEADERS = {
     'en-US,en;q=0.9,id;q=0.8,ko;q=0.7,ja;q=0.6,ms;q=0.5,zh-CN;q=0.4,zh;q=0.3,fr;q=0.2,ar;q=0.1,ru;q=0.1',
   'Accept-Encoding': 'gzip, deflate, br',
   Connection: 'keep-alive',
-  'Cache-Control': 'max-age=0',
   Cookie: 'country_code=SG',
   Priority: 'u=0, i',
   Referer: 'https://anikoto.net/home',

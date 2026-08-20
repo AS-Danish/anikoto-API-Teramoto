@@ -1,7 +1,9 @@
 import { scrapeWatchStream, WatchData } from '@/lib/scrapers/watch.scraper';
 import { waterfallWatch } from '@/lib/providers/waterfall';
-import { cacheGet, cacheSet } from '@/lib/cache';
+import { cacheGet, cacheSet, getOrSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
+import { cacheHeaders, canBypassCache, noStoreHeaders, validSlug } from '@/lib/api-cache';
+import { withFreshProxyUrls } from '@/lib/proxy-security';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,28 +32,43 @@ export async function GET(
     const resolvedParams = await params;
     const slug = resolvedParams.slug;
     const epNum = searchParams.get('ep') || '1';
-    const refresh = searchParams.get('refresh') === '1';
+    const refreshRequested = searchParams.get('refresh') === '1';
     const isStream = searchParams.get('stream') !== 'false';
 
-    if (!slug) {
-      return Response.json({ ok: false, message: 'Missing slug' }, { status: 400 });
+    const parsedEpisode = Number(epNum);
+    if (!validSlug(slug) || !Number.isInteger(parsedEpisode) || parsedEpisode < 1 || parsedEpisode > 100_000) {
+      return Response.json({ ok: false, message: 'Invalid slug or episode number.' }, { status: 400, headers: noStoreHeaders });
     }
+    if (refreshRequested && !canBypassCache(req)) {
+      return Response.json({ ok: false, message: 'Cache refresh is not authorized.' }, { status: 403, headers: noStoreHeaders });
+    }
+    const refresh = refreshRequested;
 
     const cacheKey = `watch:${slug}:${epNum}`;
 
     // ── Cache hit: respond instantly with plain JSON ──────────────────────────
-    if (!refresh) {
-      const cached = cacheGet<WatchData>(cacheKey);
+    if (!refresh && isStream) {
+      const cached = await cacheGet<WatchData>(cacheKey);
       if (cached !== undefined) {
-        return Response.json({ ok: true, data: cached, streaming: false });
+        return Response.json(
+          { ok: true, data: withFreshProxyUrls(cached), streaming: false },
+          { headers: cacheHeaders(60, 120) },
+        );
       }
     }
 
     // ── Non-streaming response: wait for all chunks and return JSON ──────────
     if (!isStream) {
-      const data = await waterfallWatch(slug, epNum);
-      cacheSet(cacheKey, data, CACHE_TTL.EPISODE);
-      return Response.json({ ok: true, data, streaming: false });
+      const data = await getOrSet(
+        cacheKey,
+        () => waterfallWatch(slug, epNum),
+        CACHE_TTL.EPISODE,
+        refresh,
+      );
+      return Response.json(
+        { ok: true, data: withFreshProxyUrls(data), streaming: false },
+        { headers: cacheHeaders(60, 120) },
+      );
     }
 
     // ── Cache miss (or forced refresh): stream the response as SSE ────────────
@@ -82,7 +99,7 @@ export async function GET(
               // Persist completed result so the next request is an instant cache hit
               if (episode) {
                 const fullData: WatchData = { episode, skip_data, servers, sources: collectedSources };
-                cacheSet(cacheKey, fullData, CACHE_TTL.EPISODE);
+                await cacheSet(cacheKey, fullData, CACHE_TTL.EPISODE);
               }
             }
           }
@@ -110,6 +127,6 @@ export async function GET(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error(`[GET /api/watch]`, message);
-    return Response.json({ ok: false, message }, { status: 500 });
+    return Response.json({ ok: false, message }, { status: 500, headers: noStoreHeaders });
   }
 }

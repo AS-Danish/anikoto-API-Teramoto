@@ -74,7 +74,7 @@ Open [http://localhost:3000](http://localhost:3000) to see the interactive API d
 | GET | `/api/type/:type?page=` | Browse by media type: `tv`, `movie`, `ova`, `ona`, `special`, `music` (returns `results` & optional `topRated`) |
 | GET | `/api/schedule?tz=&images=` | Weekly airing schedule (optional UTC tz offset in hours and image resolution) |
 | GET | `/api/watch/:slug?ep=` | Streaming sources (m3u8, subtitles, and opening/ending skip ranges) |
-| GET | `/api/proxy?url=` | Streaming proxy (CORS bypass) |
+| GET | `/api/proxy?url=&exp=&v=1&sig=` | Signed, allowlisted streaming proxy used by `/api/watch` |
 
 See the **full interactive documentation** at `/` (when running locally) or in [`public/openapi.yaml`](./public/openapi.yaml).
 
@@ -91,7 +91,9 @@ See the **full interactive documentation** at `/` (when running locally) or in [
 | `/api/schedule` | 1 hour |
 | Episodes | 10 minutes |
 
-Add `?refresh=1` to force a fresh scrape.
+Add `?refresh=1` and the server-only `x-cache-refresh-token` header to force a
+fresh scrape. The value must match `CACHE_REFRESH_SECRET`; public callers cannot
+bypass the cache.
 
 > [!TIP]
 > **Schedule Images:** By default, `/api/schedule` returns an empty string for anime images to keep response times fast (fetching schedule images requires visiting each anime details page). Setting `images=true` will concurrently fetch the poster images for all listed anime with a global concurrency limit of 5.
@@ -108,31 +110,75 @@ Configure environment variables in a `.env` file at the root directory:
 # Target base URL (default: https://anikoto.net)
 BASE_URL=https://anikoto.net
 
-# Optional: CORS allowed origins (default: "*")
-# Supports single origin, comma-separated list, or wildcard "*"
-CORS_ALLOWED_ORIGIN=http://localhost:3000,https://your-app.vercel.app
+# Exact browser origins only. Requests without Origin (server/native app) remain valid.
+CORS_ALLOWED_ORIGIN=http://localhost:3000,https://your-luffy-tv-domain.example
 
-# Optional: Cloudflare Worker URL for streaming proxy
-CF_WORKER_URL=https://your-worker-name.workers.dev
+# Hardened Cloudflare streaming proxy
+CF_WORKER_URL=https://aonime-proxy.luffytv.workers.dev
+PROXY_SIGNING_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+PROXY_URL_TTL_SECONDS=7200
+APPROVED_STREAM_HOSTS=cdn.watching.onl,*.watching.onl,s1.akirax.buzz,*.akirax.buzz,*.mewstream.buzz,*.zaplume.buzz,*.megaplay.buzz,*.megacloud.tv,*.gogocdn.net,*.gogoplay4.com,*.vidstreaming.io,*.vidcloud9.com,*.embtaku.pro
+
+# Recommended: shared cache for serverless/multi-instance deployments
+UPSTASH_REDIS_REST_URL=https://your-database.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your-server-only-token
+CACHE_NAMESPACE=anikoto:v1
+UPSTREAM_REQUESTS_PER_SECOND=8
+UPSTREAM_MAX_CONCURRENCY=6
+
+# Protects cache bypass requests
+CACHE_REFRESH_SECRET=replace-with-a-long-random-secret
 ```
+
+Successful catalog responses also include CDN cache directives. For high
+traffic, place a CDN in front of the API, configure the shared Redis cache, and
+restrict `CORS_ALLOWED_ORIGIN` to the production website. The memory-only
+fallback is bounded and coalesces concurrent requests, but it is not shared
+between separate serverless instances.
 
 ---
 
-## ☁️ Cloudflare Worker Proxy (Optional)
+## ☁️ Hardened Cloudflare Worker Proxy
 
-By default, the API provides an internal streaming proxy at `/api/proxy` to bypass CORS. For better performance and free unlimited bandwidth (100k req/day free tier), you can deploy the included Cloudflare Worker and configure the API to use it automatically.
+The API is the only component allowed to mint stream URLs. Every proxy URL is
+HMAC-signed, expires after two hours by default, and binds the target URL,
+referer, expiry, and signature version. The Worker also enforces exact CORS
+origins, approved streaming hosts, private/local-address blocking, redirect
+validation, and per-client burst and sustained rate limits.
 
-1. Deploy the worker from the `cloudflare-worker/` directory:
-   ```bash
+1. Generate one 32-byte secret. On Windows PowerShell (including older Windows
+   PowerShell versions):
+   ```powershell
+   $bytes = New-Object byte[] 32
+   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+   $rng.GetBytes($bytes)
+   $secret = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+   $rng.Dispose()
+   $secret
+   ```
+2. Save the same value as `PROXY_SIGNING_SECRET` in the Vercel API project and
+   in the Worker secret store. Never place it in the website or Flutter app:
+   ```powershell
    cd cloudflare-worker
-   npm install wrangler -g
-   wrangler deploy
+   npx wrangler@latest secret put PROXY_SIGNING_SECRET
    ```
-2. Add your worker URL as an environment variable in a `.env` file at the root of the project:
-   ```env
-   CF_WORKER_URL=https://your-worker-name.workers.dev
+3. In `cloudflare-worker/wrangler.jsonc`, replace `ALLOWED_CORS_ORIGINS` with
+   the exact production Luffy TV origin plus the two localhost origins. Add a
+   streaming hostname to `APPROVED_STREAM_HOSTS` only after observing it from a
+   trusted provider response.
+4. In Vercel, configure `CF_WORKER_URL`, `PROXY_SIGNING_SECRET`,
+   `PROXY_URL_TTL_SECONDS`, `APPROVED_STREAM_HOSTS`, and exact
+   `CORS_ALLOWED_ORIGIN` values from `.env.example`.
+5. Deploy the API first, then deploy the Worker:
+   ```powershell
+   cd cloudflare-worker
+   npm run check
+   npm run deploy
    ```
-   *Note: When this environment variable is set, the `/api/watch` endpoint will automatically return proxy URLs pointing to your Cloudflare Worker instead of the internal `/api/proxy`.*
+
+During secret rotation, set the old Worker value as
+`PROXY_SIGNING_SECRET_PREVIOUS`, deploy the new API secret, wait longer than the
+maximum proxy TTL, and then remove the previous secret.
 
 ---
 

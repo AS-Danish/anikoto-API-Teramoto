@@ -1,169 +1,149 @@
-import { NextResponse } from 'next/server';
-import axios from 'axios';
-import { DEFAULT_HEADERS } from '@/lib/constants';
+import {
+  buildSignedProxyUrl,
+  parseApprovedProxyTarget,
+  verifyProxySignature,
+} from '@/lib/proxy-security';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const targetUrl = searchParams.get('url');
-  const referer = searchParams.get('referer');
+const MAX_REDIRECTS = 5;
+const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
-  if (!targetUrl) {
-    return NextResponse.json({ ok: false, message: 'Missing url parameter' }, { status: 400 });
+function jsonError(message: string, status: number) {
+  return Response.json(
+    { ok: false, message },
+    { status, headers: { 'Cache-Control': 'private, no-store' } },
+  );
+}
+
+function isRedirect(status: number) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+async function fetchApprovedTarget(target: URL, headers: Headers) {
+  let current = target;
+  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
+    const response = await fetch(current, {
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!isRedirect(response.status)) return { response, finalUrl: current };
+    const location = response.headers.get('location');
+    const redirected = location ? parseApprovedProxyTarget(new URL(location, current).toString()) : null;
+    if (!redirected) throw new Error('The upstream redirect destination is not approved.');
+    current = redirected;
+  }
+  throw new Error('The upstream returned too many redirects.');
+}
+
+async function readTextWithLimit(response: Response, maximumBytes: number) {
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  if (declaredLength > maximumBytes) throw new Error('The manifest is too large.');
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error('The manifest is too large.');
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+function normalizeManifestUrl(value: string, manifestUrl: URL) {
+  const resolved = new URL(value, manifestUrl);
+  const host = resolved.hostname.toLowerCase();
+  if (host.endsWith('.buzz') || host.endsWith('.click')) resolved.host = manifestUrl.host;
+  return resolved.toString();
+}
+
+function responseHeaders(contentType: string, cacheControl: string) {
+  return new Headers({
+    'Content-Type': contentType,
+    'Cache-Control': cacheControl,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  });
+}
+
+export async function GET(request: Request) {
+  const requestUrl = new URL(request.url);
+  if (!verifyProxySignature(requestUrl.searchParams)) {
+    return jsonError('The proxy URL is invalid or has expired.', 401);
   }
 
-  // Get the absolute base URL dynamically so native video players can resolve the chunks
-  const host = req.headers.get('host');
-  const protocol = req.headers.get('x-forwarded-proto') || 'https';
-  const proxyBaseUrl = host ? `${protocol}://${host}` : '';
+  const target = parseApprovedProxyTarget(requestUrl.searchParams.get('url') || '');
+  if (!target) return jsonError('The streaming destination is not approved.', 403);
 
-  const headers: Record<string, string> = {
-    'User-Agent': DEFAULT_HEADERS['User-Agent'],
-    'Accept': '*/*',
-    'Accept-Encoding': 'gzip, deflate, br',
+  const referer = requestUrl.searchParams.get('referer') || '';
+  const expiresAt = Number(requestUrl.searchParams.get('exp'));
+  const upstreamHeaders = new Headers({
+    Accept: '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'cross-site',
-  };
-
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36',
+  });
   if (referer) {
-    headers['Referer'] = referer;
     try {
-      headers['Origin'] = new URL(referer).origin;
-    } catch (_) {
-      // ignore malformed referer
+      const refererUrl = new URL(referer);
+      if (refererUrl.protocol !== 'https:') return jsonError('The signed referer is malformed.', 400);
+      upstreamHeaders.set('Referer', refererUrl.toString());
+      upstreamHeaders.set('Origin', refererUrl.origin);
+    } catch {
+      return jsonError('The signed referer is malformed.', 400);
     }
   }
-
-  // Forward Range header if present (needed for partial content / video seeking)
-  const rangeHeader = req.headers.get('range');
-  if (rangeHeader) {
-    headers['Range'] = rangeHeader;
-  }
+  const range = request.headers.get('range');
+  if (range) upstreamHeaders.set('Range', range);
 
   try {
-    const response = await axios.get(targetUrl, {
-      responseType: 'arraybuffer',
-      headers,
-      timeout: 20_000,
-      // Don't throw on non-2xx so we can forward the real status
-      validateStatus: (status) => status < 600,
-    });
+    const { response: upstream, finalUrl } = await fetchApprovedTarget(target, upstreamHeaders);
+    if (!upstream.ok) return jsonError(`The upstream returned HTTP ${upstream.status}.`, upstream.status);
 
-    // If upstream blocked us (403/401/451), return the real status with a helpful message
-    if (response.status === 403 || response.status === 401) {
-      console.error(`[Proxy] Upstream blocked: ${response.status} on ${targetUrl}`);
-      return NextResponse.json(
-        {
-          ok: false,
-          message: `Upstream server blocked the request (HTTP ${response.status}). Try using the Cloudflare Worker proxy instead.`,
-          upstreamStatus: response.status,
-          url: targetUrl,
-        },
-        { status: response.status }
+    const contentType = upstream.headers.get('content-type') || '';
+    const isManifest = /\.m3u8(?:$|[?#])/i.test(finalUrl.toString()) || contentType.toLowerCase().includes('mpegurl');
+    const isSubtitle = /\.(?:vtt|srt|ass)(?:$|[?#])/i.test(finalUrl.toString()) || contentType.toLowerCase().includes('vtt');
+
+    if (isManifest) {
+      const manifest = await readTextWithLimit(upstream, MAX_MANIFEST_BYTES);
+      const proxyBase = `${requestUrl.origin}/api/proxy`;
+      const proxyChild = (value: string) => buildSignedProxyUrl(
+        proxyBase,
+        normalizeManifestUrl(value, finalUrl),
+        referer,
+        expiresAt,
       );
-    }
-
-    if (response.status >= 400) {
-      console.error(`[Proxy] Upstream error: ${response.status} on ${targetUrl}`);
-      return NextResponse.json(
-        { ok: false, message: `Upstream error: HTTP ${response.status}`, upstreamStatus: response.status, url: targetUrl },
-        { status: response.status }
-      );
-    }
-
-    const resHeaders = new Headers();
-    const contentType = (response.headers['content-type'] as string) || 'application/octet-stream';
-    resHeaders.set('Content-Type', contentType);
-    resHeaders.set('Access-Control-Allow-Origin', '*');
-    resHeaders.set('Cache-Control', 'no-cache');
-
-    // Forward Accept-Ranges and Content-Range for video seeking support
-    if (response.headers['accept-ranges']) {
-      resHeaders.set('Accept-Ranges', response.headers['accept-ranges'] as string);
-    }
-    if (response.headers['content-range']) {
-      resHeaders.set('Content-Range', response.headers['content-range'] as string);
-    }
-
-    let responseData = response.data;
-
-    // Rewrite internal URLs inside m3u8 playlists to pass through this proxy
-    if (targetUrl.includes('.m3u8') || contentType.includes('mpegurl')) {
-      const text = Buffer.from(responseData).toString('utf-8');
-      const baseUrl = new URL(targetUrl);
-
-      const rewrittenText = text.split('\n').map(line => {
-        // Rewrite URI attributes in tags (e.g. #EXT-X-KEY:URI="...", #EXT-X-MAP:URI="...", #EXT-X-MEDIA:URI="...")
-        if (line.includes('URI=')) {
-          line = line.replace(/URI=["']([^"']+)["']/g, (match, uri) => {
-            let keyUrl = uri;
-            if (!keyUrl.startsWith('http')) {
-              keyUrl = new URL(keyUrl, baseUrl).toString();
-            } else {
-              try {
-                const parsedKey = new URL(keyUrl);
-                if (
-                  parsedKey.hostname.endsWith('.buzz') ||
-                  parsedKey.hostname.endsWith('.click') ||
-                  parsedKey.hostname.includes('zaplume.buzz') ||
-                  parsedKey.hostname.includes('mewstream.buzz')
-                ) {
-                  parsedKey.host = baseUrl.host;
-                  keyUrl = parsedKey.toString();
-                }
-              } catch (_) { }
-            }
-            const proxied = `${proxyBaseUrl}/api/proxy?url=${encodeURIComponent(keyUrl)}&referer=${encodeURIComponent(referer || '')}`;
-            return `URI="${proxied}"`;
-          });
-        }
-
-        if (line.startsWith('#') || !line.trim()) return line;
-
-        // This is a media segment or sub-playlist line
-        let segmentUrl = line.trim();
-        if (!segmentUrl.startsWith('http')) {
-          segmentUrl = new URL(segmentUrl, baseUrl).toString();
-        } else {
-          try {
-            const parsedSeg = new URL(segmentUrl);
-            if (
-              parsedSeg.hostname.endsWith('.buzz') ||
-              parsedSeg.hostname.endsWith('.click') ||
-              parsedSeg.hostname.includes('zaplume.buzz') ||
-              parsedSeg.hostname.includes('mewstream.buzz')
-            ) {
-              parsedSeg.host = baseUrl.host;
-              segmentUrl = parsedSeg.toString();
-            }
-          } catch (_) { }
-        }
-
-        // Return the proxied URL with the absolute base domain so native apps can resolve it
-        return `${proxyBaseUrl}/api/proxy?url=${encodeURIComponent(segmentUrl)}&referer=${encodeURIComponent(referer || '')}`;
+      const rewritten = manifest.split(/\r?\n/).map((line) => {
+        let result = line.replace(/URI=["']([^"']+)["']/g, (_match, uri: string) => `URI="${proxyChild(uri)}"`);
+        const trimmed = result.trim();
+        if (trimmed && !trimmed.startsWith('#')) result = proxyChild(trimmed);
+        return result;
       }).join('\n');
-
-      responseData = Buffer.from(rewrittenText, 'utf-8');
+      return new Response(rewritten, {
+        status: upstream.status,
+        headers: responseHeaders('application/vnd.apple.mpegurl', 'private, no-store'),
+      });
     }
 
-    return new NextResponse(responseData, {
-      status: response.status === 206 ? 206 : 200,
-      headers: resHeaders,
-    });
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err)) {
-      const status = err.response?.status || 500;
-      const code = err.code || '';
-      console.error(`[Proxy Error] ${status} (${code}) on ${targetUrl}`);
-      return NextResponse.json(
-        { ok: false, message: `Proxy failed: ${err.message}`, code, url: targetUrl },
-        { status }
-      );
+    const headers = responseHeaders(
+      isSubtitle ? 'text/vtt; charset=utf-8' : contentType || 'application/octet-stream',
+      isSubtitle ? 'public, max-age=3600' : 'public, max-age=3600, immutable',
+    );
+    for (const name of ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+      const value = upstream.headers.get(name);
+      if (value) headers.set(name, value);
     }
-    console.error(`[Proxy Error] Unknown error on ${targetUrl}:`, err);
-    return NextResponse.json({ ok: false, message: 'Proxy request failed' }, { status: 500 });
+    return new Response(upstream.body, { status: upstream.status, headers });
+  } catch (error) {
+    console.error('[Proxy]', error instanceof Error ? error.message : 'Unknown upstream error');
+    return jsonError('The streaming source could not be reached.', 502);
   }
 }

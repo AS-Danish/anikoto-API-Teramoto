@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "aonime-proxy",
+  "main": "proxy.js",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "placement": { "mode": "smart" },
+  "vars": {
+    "ALLOWED_CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000",
+    "APPROVED_STREAM_HOSTS": "cdn.watching.onl,*.watching.onl,s1.akirax.buzz,*.akirax.buzz,*.mewstream.buzz,*.zaplume.buzz,*.megaplay.buzz,*.megacloud.tv,*.gogocdn.net,*.gogoplay4.com,*.vidstreaming.io,*.vidcloud9.com,*.embtaku.pro"
+  },
+  "ratelimits": [
+    {
+      "name": "BURST_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 10 }
+    },
+    {
+      "name": "SUSTAINED_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 600, "period": 60 }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

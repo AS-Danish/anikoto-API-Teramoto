@@ -4,6 +4,7 @@ import { scrapeAnimeEpisodes } from './anime.scraper';
 import { Episode } from '../types';
 import { extractStreamUrl, extractVidstream, SubtitleTrack, IntroOutro } from '../extractors';
 import { BASE_URL } from '../constants';
+import { makeSignedProxyUrlBuilder } from '../proxy-security';
 
 export interface VideoServer {
   id: string;    // linkId
@@ -90,30 +91,23 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 export function makeProxyHelper() {
-  const rawBaseUrl = '/api/proxy';
-  let proxyBase = rawBaseUrl.trim();
-  if (proxyBase && !proxyBase.startsWith('http') && !proxyBase.startsWith('/')) {
-    proxyBase = `https://${proxyBase}`;
-  }
-  const proxySep = proxyBase.includes('?') ? '&' : '?';
-  return (targetUrl: string, referer?: string) => {
-    const refererParam = referer ? `&referer=${encodeURIComponent(referer)}` : '';
-    return `${proxyBase}${proxySep}url=${encodeURIComponent(targetUrl)}${refererParam}`;
-  };
+  return makeSignedProxyUrlBuilder();
 }
 
-function parseSkipData(skipData: any): { intro?: IntroOutro; outro?: IntroOutro } {
+function parseSkipData(skipData: unknown): { intro?: IntroOutro; outro?: IntroOutro } {
   const result: { intro?: IntroOutro; outro?: IntroOutro } = {};
-  if (skipData?.intro && Array.isArray(skipData.intro) && skipData.intro.length >= 2) {
-    const start = Number(skipData.intro[0]);
-    const end = Number(skipData.intro[1]);
+  if (!skipData || typeof skipData !== 'object') return result;
+  const data = skipData as Record<string, unknown>;
+  if (Array.isArray(data.intro) && data.intro.length >= 2) {
+    const start = Number(data.intro[0]);
+    const end = Number(data.intro[1]);
     if (!isNaN(start) && !isNaN(end)) {
       result.intro = { start, end };
     }
   }
-  if (skipData?.outro && Array.isArray(skipData.outro) && skipData.outro.length >= 2) {
-    const start = Number(skipData.outro[0]);
-    const end = Number(skipData.outro[1]);
+  if (Array.isArray(data.outro) && data.outro.length >= 2) {
+    const start = Number(data.outro[0]);
+    const end = Number(data.outro[1]);
     if (!isNaN(start) && !isNaN(end)) {
       result.outro = { start, end };
     }

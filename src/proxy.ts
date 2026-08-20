@@ -6,17 +6,37 @@ export function proxy(request: NextRequest) {
     process.env.CORS_ALLOWED_ORIGIN ||
     process.env.CORS_ALLOWED_ORIGINS ||
     process.env.ANIKOTO_API_CORS_ALLOWED_ORIGINS ||
-    '*';
+    'http://localhost:3000,http://127.0.0.1:3000';
 
   const requestOrigin = request.headers.get('origin');
+  const allowedOrigins = allowedOriginsEnv
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin && origin !== '*');
+  const allowOrigin = requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : null;
 
-  let allowOrigin = '*';
-  if (allowedOriginsEnv !== '*') {
-    const allowedOrigins = allowedOriginsEnv.split(',').map((o) => o.trim());
-    if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
-      allowOrigin = requestOrigin;
-    } else if (allowedOrigins.length > 0) {
-      allowOrigin = allowedOrigins[0];
+  if (requestOrigin && !allowOrigin) {
+    return NextResponse.json(
+      { ok: false, message: 'This browser origin is not allowed.' },
+      { status: 403, headers: { 'Cache-Control': 'private, no-store', Vary: 'Origin' } },
+    );
+  }
+
+  if (request.nextUrl.searchParams.get('refresh') === '1') {
+    const secret = process.env.CACHE_REFRESH_SECRET;
+    const supplied = request.headers.get('x-cache-refresh-token');
+    if (!secret || supplied !== secret) {
+      return NextResponse.json(
+        { ok: false, message: 'Cache refresh is not authorized.' },
+        {
+          status: 403,
+          headers: {
+            ...(allowOrigin ? { 'Access-Control-Allow-Origin': allowOrigin } : {}),
+            'Cache-Control': 'private, no-store',
+            Vary: 'Origin',
+          },
+        },
+      );
     }
   }
 
@@ -25,25 +45,27 @@ export function proxy(request: NextRequest) {
     return new NextResponse(null, {
       status: 204,
       headers: {
-        'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        ...(allowOrigin ? { 'Access-Control-Allow-Origin': allowOrigin } : {}),
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
         'Access-Control-Allow-Headers':
-          'Content-Type, Authorization, X-Requested-With, Cache-Control, Pragma',
+          'Accept, Content-Type, Range, X-Cache-Refresh-Token',
         'Access-Control-Max-Age': '86400',
+        Vary: 'Origin',
       },
     });
   }
 
   const response = NextResponse.next();
-  response.headers.set('Access-Control-Allow-Origin', allowOrigin);
+  if (allowOrigin) response.headers.set('Access-Control-Allow-Origin', allowOrigin);
   response.headers.set(
     'Access-Control-Allow-Methods',
-    'GET, POST, PUT, DELETE, OPTIONS'
+    'GET, OPTIONS'
   );
   response.headers.set(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Requested-With, Cache-Control, Pragma'
+    'Accept, Content-Type, Range, X-Cache-Refresh-Token'
   );
+  response.headers.set('Vary', 'Origin');
 
   return response;
 }

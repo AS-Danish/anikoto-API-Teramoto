@@ -1,0 +1,10 @@
+{
+  "name": "luffytv-stream-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node proxy.test.mjs",
+    "check": "npx wrangler@latest deploy --dry-run",
+    "deploy": "npx wrangler@latest deploy"
+  }
+}
