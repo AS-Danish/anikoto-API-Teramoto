@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "placement": { "mode": "smart" },
   "vars": {
-    "ALLOWED_CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000",
+    "ALLOWED_CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000, https://luffytvstream.vercel.app",
     "APPROVED_STREAM_HOSTS": "cdn.watching.onl,*.watching.onl,s1.akirax.buzz,*.akirax.buzz,*.mewstream.buzz,*.zaplume.buzz,*.megaplay.buzz,*.megacloud.tv,*.gogocdn.net,*.gogoplay4.com,*.vidstreaming.io,*.vidcloud9.com,*.embtaku.pro"
   },
   "ratelimits": [
