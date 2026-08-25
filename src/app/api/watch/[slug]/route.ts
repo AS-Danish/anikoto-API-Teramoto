@@ -4,6 +4,11 @@ import { cacheGet, cacheSet, getOrSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
 import { cacheHeaders, canBypassCache, noStoreHeaders, validSlug } from '@/lib/api-cache';
 import { withFreshProxyUrls } from '@/lib/proxy-security';
+import {
+  playbackLog,
+  playbackRequestId,
+  safePlaybackError,
+} from '@/lib/playback-diagnostics';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,6 +32,8 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ slug: string }> }
 ) {
+  const requestId = playbackRequestId(req.headers.get('x-playback-request-id'));
+  const startedAt = Date.now();
   try {
     const { searchParams } = new URL(req.url);
     const resolvedParams = await params;
@@ -45,15 +52,29 @@ export async function GET(
     const refresh = refreshRequested;
 
     const cacheKey = `watch:${slug}:${epNum}`;
+    playbackLog(requestId, 'api.watch.request', {
+      slug,
+      episode: epNum,
+      stream: isStream,
+      refresh,
+      userAgent: (req.headers.get('user-agent') || '').slice(0, 120),
+    });
 
     // ── Cache hit: respond instantly with plain JSON ──────────────────────────
     if (!refresh && isStream) {
       const cached = await cacheGet<WatchData>(cacheKey);
       if (cached !== undefined && hasPlayableWatchData(cached)) {
+        playbackLog(requestId, 'api.watch.cache_hit', {
+          sourceCount: cached.sources.length,
+          elapsedMs: Date.now() - startedAt,
+        });
         return Response.json(
           { ok: true, data: withFreshProxyUrls(cached), streaming: false },
-          { headers: cacheHeaders(60, 120) },
+          { headers: { ...cacheHeaders(60, 120), 'X-Playback-Request-Id': requestId } },
         );
+      }
+      if (cached !== undefined) {
+        playbackLog(requestId, 'api.watch.poisoned_cache_ignored', {}, 'warn');
       }
     }
 
@@ -61,7 +82,7 @@ export async function GET(
     if (!isStream) {
       let data = await getOrSet(
         cacheKey,
-        () => waterfallWatch(slug, epNum),
+        () => waterfallWatch(slug, epNum, requestId),
         CACHE_TTL.EPISODE,
         refresh,
       );
@@ -71,7 +92,7 @@ export async function GET(
       if (!hasPlayableWatchData(data)) {
         data = await getOrSet(
           cacheKey,
-          () => waterfallWatch(slug, epNum),
+          () => waterfallWatch(slug, epNum, requestId),
           CACHE_TTL.EPISODE,
           true,
         );
@@ -79,9 +100,22 @@ export async function GET(
       if (!hasPlayableWatchData(data)) {
         throw new Error('No provider returned a playable video source.');
       }
+      playbackLog(requestId, 'api.watch.resolved', {
+        sourceCount: data.sources.length,
+        serverCount: data.servers.length,
+        provider: (data as WatchData & { source?: string }).source || 'unknown',
+        mediaHosts: [...new Set(data.sources.map((source) => {
+          try {
+            return new URL(source.m3u8 || source.url).hostname;
+          } catch {
+            return '';
+          }
+        }).filter(Boolean))],
+        elapsedMs: Date.now() - startedAt,
+      });
       return Response.json(
         { ok: true, data: withFreshProxyUrls(data), streaming: false },
-        { headers: cacheHeaders(60, 120) },
+        { headers: { ...cacheHeaders(60, 120), 'X-Playback-Request-Id': requestId } },
       );
     }
 
@@ -96,7 +130,7 @@ export async function GET(
         let skip_data: WatchData['skip_data'] = null;
 
         try {
-          for await (const chunk of scrapeWatchStream(slug, epNum)) {
+          for await (const chunk of scrapeWatchStream(slug, epNum, requestId)) {
             // Forward each chunk in SSE format
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
 
@@ -146,11 +180,19 @@ export async function GET(
         'Connection': 'keep-alive',
         'Transfer-Encoding': 'chunked',
         'X-Accel-Buffering': 'no', // Disable Nginx/proxy buffering
+        'X-Playback-Request-Id': requestId,
       },
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error(`[GET /api/watch]`, message);
-    return Response.json({ ok: false, message }, { status: 500, headers: noStoreHeaders });
+    playbackLog(requestId, 'api.watch.failed', {
+      error: safePlaybackError(err),
+      elapsedMs: Date.now() - startedAt,
+    }, 'error');
+    return Response.json(
+      { ok: false, message, requestId },
+      { status: 500, headers: { ...noStoreHeaders, 'X-Playback-Request-Id': requestId } },
+    );
   }
 }

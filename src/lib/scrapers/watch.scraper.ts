@@ -5,6 +5,7 @@ import { Episode } from '../types';
 import { extractStreamUrl, extractVidstream, SubtitleTrack, IntroOutro } from '../extractors';
 import { BASE_URL } from '../constants';
 import { makeSignedProxyUrlBuilder } from '../proxy-security';
+import { playbackLog, safeHost, safePlaybackError } from '../playback-diagnostics';
 
 export interface VideoServer {
   id: string;    // linkId
@@ -121,12 +122,14 @@ function buildSourceTasks(
   servers: VideoServer[],
   slug: string,
   epNum: string,
-  getProxyUrl: (url: string, referer?: string) => string
+  getProxyUrl: (url: string, referer?: string) => string,
+  requestId: string,
 ): Array<Promise<{ source: VideoSource; intro?: IntroOutro; outro?: IntroOutro } | null>> {
   const epReferer = `${BASE_URL}/watch/${slug}/ep-${epNum}`;
 
   // Regular servers
   const serverTasks: Array<Promise<{ source: VideoSource; intro?: IntroOutro; outro?: IntroOutro } | null>> = servers.map(async (server) => {
+    const startedAt = Date.now();
     try {
       return await withTimeout(
         (async () => {
@@ -192,6 +195,15 @@ function buildSourceTasks(
               proxyUrl: getProxyUrl(t.file, extracted!.referer),
             })) || [],
           };
+          playbackLog(requestId, 'scraper.server_resolved', {
+            server: server.name,
+            type: server.type,
+            embedHost: safeHost(embedUrl),
+            mediaHost: safeHost(extracted?.m3u8),
+            directMedia: Boolean(extracted?.m3u8),
+            captionCount: extracted?.tracks?.length || 0,
+            elapsedMs: Date.now() - startedAt,
+          });
           return {
             source,
             intro: extracted?.intro ?? ajaxSkip.intro,
@@ -203,6 +215,12 @@ function buildSourceTasks(
       );
     } catch (err) {
       console.error(`Skipping server ${server.name} (${server.id}):`, err instanceof Error ? err.message : err);
+      playbackLog(requestId, 'scraper.server_failed', {
+        server: server.name,
+        type: server.type,
+        elapsedMs: Date.now() - startedAt,
+        error: safePlaybackError(err),
+      }, 'warn');
       return null;
     }
   });
@@ -224,10 +242,15 @@ function buildSourceTasks(
  */
 export async function* scrapeWatchStream(
   slug: string,
-  epNum: string
+  epNum: string,
+  requestId = 'untracked',
 ): AsyncGenerator<WatchStreamChunk> {
   // ── Step 1: resolve episode (~1 RTT, cached after first hit) ─────────────
   const { episodes } = await scrapeAnimeEpisodes(slug);
+  playbackLog(requestId, 'scraper.episodes_loaded', {
+    episodeCount: episodes.length,
+    requestedEpisode: epNum,
+  });
   const ep = episodes.find((e) => e.number === epNum);
 
   if (!ep || !ep.dataIds) {
@@ -243,6 +266,9 @@ export async function* scrapeWatchStream(
   );
 
   if (!listData.status || !listData.result) {
+    playbackLog(requestId, 'scraper.server_list_empty', {
+      status: listData.status,
+    }, 'warn');
     yield { type: 'done' } satisfies WatchStreamDone;
     return;
   }
@@ -270,10 +296,14 @@ export async function* scrapeWatchStream(
 
   // Emit server list — client can render the server selector UI
   yield { type: 'servers', servers } satisfies WatchStreamServers;
+  playbackLog(requestId, 'scraper.server_list_loaded', {
+    serverCount: servers.length,
+    servers: servers.map((server) => `${server.name}:${server.type}`).slice(0, 20),
+  });
 
   // ── Step 3: launch all source tasks and yield as each resolves ────────────
   const getProxyUrl = makeProxyHelper();
-  const tasks = buildSourceTasks(ep, servers, slug, epNum, getProxyUrl);
+  const tasks = buildSourceTasks(ep, servers, slug, epNum, getProxyUrl, requestId);
 
   // Tag each task so it can identify and remove itself from the pending set.
   type Tagged = Promise<{
@@ -291,6 +321,7 @@ export async function* scrapeWatchStream(
     outro: { start: 0, end: 0 }
   };
   let hasRealSkipData = false;
+  let resolvedSourceCount = 0;
 
   // Race all pending promises; yield each source the moment it resolves
   while (pending.size > 0) {
@@ -312,6 +343,7 @@ export async function* scrapeWatchStream(
       } else if (!isReal && !hasRealSkipData) {
         bestSkipData = { intro: sourceIntro, outro: sourceOutro };
       }
+      resolvedSourceCount += 1;
       yield { type: 'source', source } satisfies WatchStreamSource;
     }
   }
@@ -324,6 +356,10 @@ export async function* scrapeWatchStream(
     } satisfies WatchStreamSkipData;
   }
 
+  playbackLog(requestId, 'scraper.completed', {
+    serverCount: servers.length,
+    sourceCount: resolvedSourceCount,
+  }, resolvedSourceCount > 0 ? 'info' : 'warn');
   yield { type: 'done' } satisfies WatchStreamDone;
 }
 
@@ -331,14 +367,18 @@ export async function* scrapeWatchStream(
  * Non-streaming variant — collects all sources then returns.
  * Used when serving from cache (instant response, no streaming needed).
  */
-export async function scrapeWatch(slug: string, epNum: string): Promise<WatchData> {
+export async function scrapeWatch(
+  slug: string,
+  epNum: string,
+  requestId = 'untracked',
+): Promise<WatchData> {
   // Collect all chunks from the streaming generator
   const sources: VideoSource[] = [];
   let episode: Episode | undefined;
   let servers: VideoServer[] = [];
   let skip_data: WatchData['skip_data'] = null;
 
-  for await (const chunk of scrapeWatchStream(slug, epNum)) {
+  for await (const chunk of scrapeWatchStream(slug, epNum, requestId)) {
     if (chunk.type === 'episode') episode = chunk.episode;
     else if (chunk.type === 'servers') servers = chunk.servers;
     else if (chunk.type === 'skip_data') skip_data = chunk.skip_data;

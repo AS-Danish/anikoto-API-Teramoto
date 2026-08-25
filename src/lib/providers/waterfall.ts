@@ -3,6 +3,7 @@ import { scrapeWatch, WatchData } from '../scrapers/watch.scraper';
 import { getConsumetAnime, getConsumetWatch } from './consumet.provider';
 import { getShineiiAnime, getShineiiWatch } from './shineii.provider';
 import { getAnilistAnime, getAnilistWatch } from './anilist.provider';
+import { playbackLog, safePlaybackError } from '../playback-diagnostics';
 
 export function hasPlayableWatchData(data: unknown): data is WatchData {
   if (!data || typeof data !== 'object') return false;
@@ -158,59 +159,66 @@ export async function waterfallAnimeDetail(slug: string, startEpisode?: number, 
   throw new Error('All waterfall providers failed to fetch anime details for slug: ' + slug);
 }
 
-export async function waterfallWatch(slug: string, epNum: string) {
-  console.log(`\n[Waterfall] 🌊 Starting Watch Waterfall for: ${slug} | Ep: ${epNum}`);
-  
-  // 1. Primary: Anikoto (Local Scraper)
-  try {
-    console.log(`[Waterfall] 1. Attempting Primary Anikoto Scraper...`);
-    const data = requirePlayableWatchData('Anikoto', slug, epNum, await scrapeWatch(slug, epNum));
-    console.log(`[Waterfall] ✅ Anikoto succeeded!`);
-    return { ...data, source: 'anikoto' };
-  } catch (error) {
-    const errObj = error as Error;
-    console.error(`[Waterfall] ❌ Primary Anikoto failed: ${errObj.message || 'Unknown error'}`);
-  }
+export async function waterfallWatch(slug: string, epNum: string, requestId = 'untracked') {
+  const attempts: Array<{
+    name: string;
+    source: string;
+    load: () => Promise<unknown>;
+  }> = [
+    {
+      name: 'Anikoto',
+      source: 'anikoto',
+      load: () => scrapeWatch(slug, epNum, requestId),
+    },
+    {
+      name: 'Consumet',
+      source: 'consumet',
+      load: () => getConsumetWatch(slug, epNum),
+    },
+    {
+      name: 'Shineii',
+      source: 'shineii',
+      load: () => getShineiiWatch(slug, epNum),
+    },
+    {
+      name: 'GogoAnime',
+      source: 'gogoanime',
+      load: () => getAnilistWatch(slug, epNum),
+    },
+  ];
 
-  // 2. Fallback 1: Consumet
-  try {
-    console.log(`[Waterfall] 2. Attempting Consumet...`);
-    const data = requirePlayableWatchData('Consumet', slug, epNum, await getConsumetWatch(slug, epNum));
-    if (data) {
-        console.log(`[Waterfall] ✅ Consumet succeeded!`);
-        return { ...data, source: 'consumet' };
+  for (const [index, attempt] of attempts.entries()) {
+    const startedAt = Date.now();
+    playbackLog(requestId, 'provider.attempt_started', {
+      provider: attempt.name,
+      order: index + 1,
+    });
+    try {
+      const data = requirePlayableWatchData(
+        attempt.name,
+        slug,
+        epNum,
+        await attempt.load(),
+      );
+      playbackLog(requestId, 'provider.attempt_succeeded', {
+        provider: attempt.name,
+        sourceCount: data.sources.length,
+        serverCount: data.servers.length,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return { ...data, source: attempt.source };
+    } catch (error) {
+      playbackLog(requestId, 'provider.attempt_failed', {
+        provider: attempt.name,
+        elapsedMs: Date.now() - startedAt,
+        error: safePlaybackError(error),
+      }, 'warn');
     }
-  } catch (error) {
-    const errObj = error as Error;
-    console.error(`[Waterfall] ❌ Consumet failed: ${errObj.message || 'Unknown error'}`);
   }
 
-  // 3. Fallback 2: Shineii86 Deployment
-  try {
-    console.log(`[Waterfall] 3. Attempting Shineii...`);
-    const data = requirePlayableWatchData('Shineii', slug, epNum, await getShineiiWatch(slug, epNum));
-    if (data) {
-        console.log(`[Waterfall] ✅ Shineii succeeded!`);
-        return { ...data, source: 'shineii' };
-    }
-  } catch (error) {
-    const errObj = error as Error;
-    console.error(`[Waterfall] ❌ Shineii failed: ${errObj.message || 'Unknown error'}`);
-  }
-
-  // 4. Fallback 3: Anilist + GogoAnime
-  try {
-    console.log(`[Waterfall] 4. Attempting GogoAnime Fallback...`);
-    const data = requirePlayableWatchData('GogoAnime', slug, epNum, await getAnilistWatch(slug, epNum));
-    if (data) {
-        console.log(`[Waterfall] ✅ GogoAnime succeeded!`);
-        return { ...data, source: 'gogoanime' };
-    }
-  } catch (error) {
-    const errObj = error as Error;
-    console.error(`[Waterfall] ❌ GogoAnime failed: ${errObj.message || 'Unknown error'}`);
-  }
-
-  console.error(`[Waterfall] 💥 FATAL: All providers failed for watch: ${slug} (Ep: ${epNum})`);
-  throw new Error('All waterfall providers failed to fetch watch data for slug: ' + slug + ' ep: ' + epNum);
+  playbackLog(requestId, 'provider.waterfall_exhausted', {
+    slug,
+    episode: epNum,
+  }, 'error');
+  throw new Error(`All waterfall providers failed for ${slug} episode ${epNum}`);
 }

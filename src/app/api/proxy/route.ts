@@ -3,16 +3,27 @@ import {
   parseApprovedProxyTarget,
   verifyProxySignature,
 } from '@/lib/proxy-security';
+import {
+  playbackLog,
+  playbackRequestId,
+  safePlaybackError,
+} from '@/lib/playback-diagnostics';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_REDIRECTS = 5;
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
-function jsonError(message: string, status: number) {
+function jsonError(message: string, status: number, requestId: string) {
   return Response.json(
-    { ok: false, message },
-    { status, headers: { 'Cache-Control': 'private, no-store' } },
+    { ok: false, message, requestId },
+    {
+      status,
+      headers: {
+        'Cache-Control': 'private, no-store',
+        'X-Playback-Request-Id': requestId,
+      },
+    },
   );
 }
 
@@ -76,13 +87,19 @@ function responseHeaders(contentType: string, cacheControl: string) {
 }
 
 export async function GET(request: Request) {
+  const requestId = playbackRequestId(request.headers.get('x-playback-request-id'));
+  const startedAt = Date.now();
   const requestUrl = new URL(request.url);
   if (!verifyProxySignature(requestUrl.searchParams)) {
-    return jsonError('The proxy URL is invalid or has expired.', 401);
+    playbackLog(requestId, 'proxy.signature_rejected', {}, 'warn');
+    return jsonError('The proxy URL is invalid or has expired.', 401, requestId);
   }
 
   const target = parseApprovedProxyTarget(requestUrl.searchParams.get('url') || '');
-  if (!target) return jsonError('The streaming destination is not approved.', 403);
+  if (!target) {
+    playbackLog(requestId, 'proxy.target_rejected', {}, 'warn');
+    return jsonError('The streaming destination is not approved.', 403, requestId);
+  }
 
   const referer = requestUrl.searchParams.get('referer') || '';
   const expiresAt = Number(requestUrl.searchParams.get('exp'));
@@ -94,11 +111,11 @@ export async function GET(request: Request) {
   if (referer) {
     try {
       const refererUrl = new URL(referer);
-      if (refererUrl.protocol !== 'https:') return jsonError('The signed referer is malformed.', 400);
+      if (refererUrl.protocol !== 'https:') return jsonError('The signed referer is malformed.', 400, requestId);
       upstreamHeaders.set('Referer', refererUrl.toString());
       upstreamHeaders.set('Origin', refererUrl.origin);
     } catch {
-      return jsonError('The signed referer is malformed.', 400);
+      return jsonError('The signed referer is malformed.', 400, requestId);
     }
   }
   const range = request.headers.get('range');
@@ -106,7 +123,16 @@ export async function GET(request: Request) {
 
   try {
     const { response: upstream, finalUrl } = await fetchApprovedTarget(target, upstreamHeaders);
-    if (!upstream.ok) return jsonError(`The upstream returned HTTP ${upstream.status}.`, upstream.status);
+    if (!upstream.ok) {
+      playbackLog(requestId, 'proxy.upstream_rejected', {
+        targetHost: target.hostname,
+        finalHost: finalUrl.hostname,
+        status: upstream.status,
+        ranged: Boolean(range),
+        elapsedMs: Date.now() - startedAt,
+      }, 'warn');
+      return jsonError(`The upstream returned HTTP ${upstream.status}.`, upstream.status, requestId);
+    }
 
     const contentType = upstream.headers.get('content-type') || '';
     const isManifest = /\.m3u8(?:$|[?#])/i.test(finalUrl.toString()) || contentType.toLowerCase().includes('mpegurl');
@@ -114,6 +140,14 @@ export async function GET(request: Request) {
 
     if (isManifest) {
       const manifest = await readTextWithLimit(upstream, MAX_MANIFEST_BYTES);
+      playbackLog(requestId, 'proxy.manifest_loaded', {
+        targetHost: target.hostname,
+        finalHost: finalUrl.hostname,
+        status: upstream.status,
+        bytes: manifest.length,
+        lineCount: manifest.split(/\r?\n/).length,
+        elapsedMs: Date.now() - startedAt,
+      });
       const proxyBase = `${requestUrl.origin}/api/proxy`;
       const proxyChild = (value: string) => buildSignedProxyUrl(
         proxyBase,
@@ -129,7 +163,22 @@ export async function GET(request: Request) {
       }).join('\n');
       return new Response(rewritten, {
         status: upstream.status,
-        headers: responseHeaders('application/vnd.apple.mpegurl', 'private, no-store'),
+        headers: new Headers({
+          ...Object.fromEntries(responseHeaders('application/vnd.apple.mpegurl', 'private, no-store')),
+          'X-Playback-Request-Id': requestId,
+        }),
+      });
+    }
+
+    if (process.env.PLAYBACK_DIAGNOSTICS_PROXY_SEGMENTS === 'true') {
+      playbackLog(requestId, 'proxy.media_loaded', {
+        targetHost: target.hostname,
+        finalHost: finalUrl.hostname,
+        status: upstream.status,
+        contentType,
+        ranged: Boolean(range),
+        contentLength: upstream.headers.get('content-length') || '',
+        elapsedMs: Date.now() - startedAt,
       });
     }
 
@@ -141,9 +190,16 @@ export async function GET(request: Request) {
       const value = upstream.headers.get(name);
       if (value) headers.set(name, value);
     }
+    headers.set('X-Playback-Request-Id', requestId);
     return new Response(upstream.body, { status: upstream.status, headers });
   } catch (error) {
     console.error('[Proxy]', error instanceof Error ? error.message : 'Unknown upstream error');
-    return jsonError('The streaming source could not be reached.', 502);
+    playbackLog(requestId, 'proxy.failed', {
+      targetHost: target.hostname,
+      ranged: Boolean(range),
+      elapsedMs: Date.now() - startedAt,
+      error: safePlaybackError(error),
+    }, 'error');
+    return jsonError('The streaming source could not be reached.', 502, requestId);
   }
 }
