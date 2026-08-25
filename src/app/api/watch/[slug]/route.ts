@@ -1,5 +1,5 @@
 import { scrapeWatchStream, WatchData } from '@/lib/scrapers/watch.scraper';
-import { waterfallWatch } from '@/lib/providers/waterfall';
+import { hasPlayableWatchData, waterfallWatch } from '@/lib/providers/waterfall';
 import { cacheGet, cacheSet, getOrSet } from '@/lib/cache';
 import { CACHE_TTL } from '@/lib/constants';
 import { cacheHeaders, canBypassCache, noStoreHeaders, validSlug } from '@/lib/api-cache';
@@ -49,7 +49,7 @@ export async function GET(
     // ── Cache hit: respond instantly with plain JSON ──────────────────────────
     if (!refresh && isStream) {
       const cached = await cacheGet<WatchData>(cacheKey);
-      if (cached !== undefined) {
+      if (cached !== undefined && hasPlayableWatchData(cached)) {
         return Response.json(
           { ok: true, data: withFreshProxyUrls(cached), streaming: false },
           { headers: cacheHeaders(60, 120) },
@@ -59,12 +59,26 @@ export async function GET(
 
     // ── Non-streaming response: wait for all chunks and return JSON ──────────
     if (!isStream) {
-      const data = await getOrSet(
+      let data = await getOrSet(
         cacheKey,
         () => waterfallWatch(slug, epNum),
         CACHE_TTL.EPISODE,
         refresh,
       );
+      // Older deployments could cache an empty source list as a successful
+      // response. Bypass that poisoned value once and replace it with a valid
+      // provider result.
+      if (!hasPlayableWatchData(data)) {
+        data = await getOrSet(
+          cacheKey,
+          () => waterfallWatch(slug, epNum),
+          CACHE_TTL.EPISODE,
+          true,
+        );
+      }
+      if (!hasPlayableWatchData(data)) {
+        throw new Error('No provider returned a playable video source.');
+      }
       return Response.json(
         { ok: true, data: withFreshProxyUrls(data), streaming: false },
         { headers: cacheHeaders(60, 120) },
@@ -99,7 +113,17 @@ export async function GET(
               // Persist completed result so the next request is an instant cache hit
               if (episode) {
                 const fullData: WatchData = { episode, skip_data, servers, sources: collectedSources };
-                await cacheSet(cacheKey, fullData, CACHE_TTL.EPISODE);
+                if (hasPlayableWatchData(fullData)) {
+                  await cacheSet(cacheKey, fullData, CACHE_TTL.EPISODE);
+                } else {
+                  controller.enqueue(
+                    encoder.encode(`data: ${JSON.stringify({
+                      type: 'error',
+                      ok: false,
+                      message: 'No provider returned a playable video source.',
+                    })}\n\n`),
+                  );
+                }
               }
             }
           }
