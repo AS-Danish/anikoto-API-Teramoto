@@ -2,7 +2,13 @@ import * as cheerio from 'cheerio';
 import { fetchJson } from '../fetcher';
 import { scrapeAnimeEpisodes } from './anime.scraper';
 import { Episode } from '../types';
-import { extractStreamUrl, extractVidstream, SubtitleTrack, IntroOutro } from '../extractors';
+import {
+  extractStreamUrl,
+  extractStreamViaWorker,
+  extractVidstream,
+  SubtitleTrack,
+  IntroOutro,
+} from '../extractors';
 import { BASE_URL } from '../constants';
 import { makeSignedProxyUrlBuilder } from '../proxy-security';
 import { playbackLog, safeHost, safePlaybackError } from '../playback-diagnostics';
@@ -181,6 +187,21 @@ function buildSourceTasks(
             }
           } else {
             extracted = await extractStreamUrl(embedUrl, epReferer);
+          }
+
+          if (!extracted) {
+            playbackLog(requestId, 'scraper.worker_fallback_started', {
+              server: server.name,
+              embedHost: safeHost(embedUrl),
+            }, 'warn');
+            extracted = await extractStreamViaWorker(embedUrl, epReferer, requestId);
+            playbackLog(requestId, extracted
+              ? 'scraper.worker_fallback_succeeded'
+              : 'scraper.worker_fallback_failed', {
+              server: server.name,
+              embedHost: safeHost(embedUrl),
+              mediaHost: safeHost(extracted?.m3u8),
+            }, extracted ? 'info' : 'warn');
           }
 
           const source: VideoSource = {

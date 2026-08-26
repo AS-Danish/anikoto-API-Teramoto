@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants';
+import { makeSignedProxyUrlBuilder } from './proxy-security';
 
 export interface SubtitleTrack {
   file: string;
@@ -19,6 +20,48 @@ export interface ExtractedStream {
   tracks: SubtitleTrack[];
   intro?: IntroOutro;
   outro?: IntroOutro;
+}
+
+type WorkerResolveResponse = {
+  ok?: boolean;
+  m3u8?: string;
+  referer?: string;
+  tracks?: SubtitleTrack[];
+  intro?: IntroOutro;
+  outro?: IntroOutro;
+};
+
+/**
+ * Resolve an embed through the signed Cloudflare Worker when the video host
+ * rejects Vercel's data-centre IP. The same allow-list, expiry and HMAC used by
+ * the media proxy protect this endpoint, so it cannot become an open proxy.
+ */
+export async function extractStreamViaWorker(
+  embedUrl: string,
+  parentReferer: string,
+  requestId?: string,
+): Promise<ExtractedStream | null> {
+  try {
+    const signedProxyUrl = makeSignedProxyUrlBuilder()(embedUrl, parentReferer);
+    const resolverUrl = new URL(signedProxyUrl);
+    resolverUrl.pathname = '/resolve';
+    const { data } = await axios.get<WorkerResolveResponse>(resolverUrl.toString(), {
+      headers: requestId ? { 'X-Playback-Request-Id': requestId } : undefined,
+      timeout: 12_000,
+    });
+    if (data?.ok !== true || typeof data.m3u8 !== 'string' || !data.m3u8) return null;
+    return {
+      m3u8: data.m3u8,
+      referer: typeof data.referer === 'string' && data.referer
+        ? data.referer
+        : new URL(embedUrl).origin + '/',
+      tracks: Array.isArray(data.tracks) ? data.tracks : [],
+      intro: data.intro,
+      outro: data.outro,
+    };
+  } catch {
+    return null;
+  }
 }
 
 let _keysCache: Record<string, string> | null = null;

@@ -5,6 +5,7 @@ const MAX_PROXY_TTL_SECONDS = 6 * 60 * 60;
 const CLOCK_SKEW_SECONDS = 30;
 const MAX_REDIRECTS = 5;
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
+const MAX_RESOLVER_BYTES = 512 * 1024;
 
 function splitList(value) {
   return (value || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -228,6 +229,105 @@ async function enforceRateLimits(request, env) {
   return burst.success && sustained.success;
 }
 
+function resolverTarget(value, env) {
+  const target = approvedTarget(value, env);
+  if (!target) return null;
+  const hostname = target.hostname.toLowerCase();
+  return hostname === 'megaplay.buzz' || hostname.endsWith('.megaplay.buzz')
+    ? target
+    : null;
+}
+
+function resolverHeaders(referer, accept) {
+  const headers = new Headers({
+    Accept: accept,
+    'Accept-Language': 'en-US,en;q=0.9',
+    'User-Agent': USER_AGENT,
+  });
+  if (referer) headers.set('Referer', referer);
+  return headers;
+}
+
+async function resolveMegaplay(target, env) {
+  const embedReferer = `${target.origin}/`;
+  const { response: embedResponse } = await fetchApprovedTarget(
+    target,
+    resolverHeaders(embedReferer, 'text/html,application/xhtml+xml'),
+    env,
+  );
+  if (!embedResponse.ok) throw new Error(`Embed returned HTTP ${embedResponse.status}`);
+  const html = await readTextWithLimit(embedResponse, MAX_RESOLVER_BYTES);
+  const fileId = html.match(/<title>\s*File\s+([0-9]+)/i)?.[1];
+  if (!fileId) throw new Error('Embed did not contain a file ID');
+
+  const sourcesUrl = new URL('/stream/getSources', target.origin);
+  sourcesUrl.searchParams.set('id', fileId);
+  const server = target.searchParams.get('s');
+  if (server) sourcesUrl.searchParams.set('s', server);
+  const approvedSourcesUrl = approvedTarget(sourcesUrl.toString(), env);
+  if (!approvedSourcesUrl) throw new Error('Sources endpoint is not approved');
+  const { response: sourcesResponse } = await fetchApprovedTarget(
+    approvedSourcesUrl,
+    resolverHeaders(embedReferer, 'application/json, text/javascript, */*'),
+    env,
+  );
+  if (!sourcesResponse.ok) throw new Error(`Sources returned HTTP ${sourcesResponse.status}`);
+  const raw = await readTextWithLimit(sourcesResponse, MAX_RESOLVER_BYTES);
+  const data = JSON.parse(raw);
+  const m3u8 = data?.sources?.file;
+  if (typeof m3u8 !== 'string' || !approvedTarget(m3u8, env)) {
+    throw new Error('Sources response did not contain approved media');
+  }
+  const tracks = Array.isArray(data?.tracks)
+    ? data.tracks.filter((track) => track && typeof track.file === 'string' && approvedTarget(track.file, env))
+    : [];
+  return {
+    m3u8,
+    referer: embedReferer,
+    tracks,
+    intro: data?.intro,
+    outro: data?.outro,
+  };
+}
+
+async function handleResolve(request, requestUrl, env, origin) {
+  if (!await verifySignature(requestUrl.searchParams, env)) {
+    return jsonError('The resolver URL is invalid or has expired.', 401, origin);
+  }
+  const target = resolverTarget(requestUrl.searchParams.get('url') || '', env);
+  if (!target) return jsonError('The embed destination is not approved.', 403, origin);
+  const requestId = request.headers.get('X-Playback-Request-Id') || crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+  const startedAt = Date.now();
+  try {
+    const resolved = await resolveMegaplay(target, env);
+    console.log(JSON.stringify({
+      scope: 'playback',
+      requestId,
+      event: 'worker.resolve.succeeded',
+      embedHost: target.hostname,
+      mediaHost: new URL(resolved.m3u8).hostname,
+      captionCount: resolved.tracks.length,
+      elapsedMs: Date.now() - startedAt,
+    }));
+    const headers = corsHeaders(origin);
+    headers.set('Cache-Control', 'private, no-store');
+    headers.set('X-Playback-Request-Id', requestId);
+    return Response.json({ ok: true, ...resolved }, { headers });
+  } catch (error) {
+    console.log(JSON.stringify({
+      scope: 'playback',
+      requestId,
+      event: 'worker.resolve.failed',
+      embedHost: target.hostname,
+      message: error instanceof Error ? error.message : String(error),
+      elapsedMs: Date.now() - startedAt,
+    }));
+    return jsonError('The embed source could not be resolved.', 502, origin, {
+      'X-Playback-Request-Id': requestId,
+    });
+  }
+}
+
 const worker = {
   async fetch(request, env) {
     const requestUrl = new URL(request.url);
@@ -248,6 +348,9 @@ const worker = {
     }
     if (!env.PROXY_SIGNING_SECRET || env.PROXY_SIGNING_SECRET.length < 32) {
       return jsonError('The proxy is not configured.', 503, origin);
+    }
+    if (requestUrl.pathname === '/resolve') {
+      return handleResolve(request, requestUrl, env, origin);
     }
     if (!await verifySignature(requestUrl.searchParams, env)) {
       return jsonError('The proxy URL is invalid or has expired.', 401, origin);
@@ -338,5 +441,6 @@ export default worker;
 export const testHelpers = {
   approvedTarget,
   isPrivateOrLocalHostname,
+  resolverTarget,
   signTarget,
 };

@@ -178,7 +178,7 @@ export async function waterfallWatch(slug: string, epNum: string, requestId = 'u
     {
       name: 'Shineii',
       source: 'shineii',
-      load: () => getShineiiWatch(slug, epNum),
+      load: () => getShineiiWatch(slug, epNum, requestId),
     },
     {
       name: 'GogoAnime',

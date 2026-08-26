@@ -1,99 +1,133 @@
-import { makeProxyHelper } from '../scrapers/watch.scraper';
 import axios from 'axios';
+import { BASE_URL } from '../constants';
+import { extractStreamUrl, extractStreamViaWorker } from '../extractors';
+import { makeProxyHelper } from '../scrapers/watch.scraper';
 
-// Ensure you set this in your Vercel Environment Variables later
-const SHINEII_URL = process.env.SHINEII_URL || 'https://your-shineii-deployment.vercel.app';
+const SHINEII_URL = (process.env.SHINEII_URL || 'https://anikototvapi.vercel.app').replace(/\/$/, '');
+
+type JsonRecord = Record<string, unknown>;
+
+function record(value: unknown): JsonRecord {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as JsonRecord
+    : {};
+}
+
+function text(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
 
 export async function getShineiiAnime(slug: string) {
   try {
-    // Shineii uses /api/info?slug= instead of /api/anime/[slug]
-    const res = await axios.get(`${SHINEII_URL}/api/info?slug=${slug}`);
-    
-    // Shineii uses { success: true, results: ... } instead of { ok: true, data: ... }
-    if (res.data && res.data.success) {
-      const data = res.data.results;
-      
-      // Map Shineii's fields back to our Next.js expected format if necessary
-      return {
-        id: data.animeId ? String(data.animeId) : data.id,
-        slug: slug,
-        title: data.title,
-        titleJp: data.japaneseTitle,
-        image: data.poster,
-        synopsis: data.synopsis,
-        type: data.type,
-        status: data.status,
-        genres: data.genres || [],
-        episodeCount: parseInt(data.episodes, 10) || undefined,
-        // Mock episodes list if not fully returned by /info
-        episodes: {
-          animeId: data.animeId ? String(data.animeId) : data.id,
-          slug: slug,
-          episodes: Array.from({ length: parseInt(data.episodes, 10) || 12 }).map((_, i) => ({
-            id: `ep-${i + 1}`,
-            number: String(i + 1),
-            title: `Episode ${i + 1}`,
-            href: `/watch/${slug}?ep=${i + 1}`
-          }))
-        },
-        seasons: data.seasons || []
-      };
-    }
-  } catch (error) {
+    const res = await axios.get(`${SHINEII_URL}/api/info?slug=${encodeURIComponent(slug)}`, {
+      timeout: 12_000,
+    });
+    if (!res.data?.success) return null;
+    const data = res.data.results;
+    return {
+      id: data.animeId ? String(data.animeId) : data.id,
+      slug,
+      title: data.title,
+      titleJp: data.japaneseTitle,
+      image: data.poster,
+      synopsis: data.synopsis,
+      type: data.type,
+      status: data.status,
+      genres: data.genres || [],
+      episodeCount: Number.parseInt(data.episodes, 10) || undefined,
+      episodes: {
+        animeId: data.animeId ? String(data.animeId) : data.id,
+        slug,
+        episodes: [],
+      },
+      seasons: data.seasons || [],
+    };
+  } catch {
     throw new Error('Shineii API fetch failed');
   }
-  return null;
 }
 
-export async function getShineiiWatch(slug: string, epNum: string) {
+export async function getShineiiWatch(slug: string, epNum: string, requestId?: string) {
   try {
-    // 1. Fetch watch page to get server IDs
-    const watchRes = await axios.get(`${SHINEII_URL}/api/watch?slug=${slug}&ep=${epNum}`);
-    if (!watchRes.data || !watchRes.data.success) {
-      throw new Error('Shineii API watch page fetch failed');
-    }
+    const watchResponse = await axios.get(
+      `${SHINEII_URL}/api/watch?slug=${encodeURIComponent(slug)}&ep=${encodeURIComponent(epNum)}`,
+      { timeout: 15_000 },
+    );
+    if (!watchResponse.data?.success) throw new Error('Watch metadata unavailable');
+    const watchData = record(watchResponse.data.results);
+    const animeId = text(watchData.animeId) || String(watchData.animeId || '');
+    if (!animeId) throw new Error('Anime ID unavailable');
 
-    const watchData = watchRes.data.results;
-    const servers = watchData.servers || [];
-    
-    if (servers.length === 0) {
-      throw new Error('No servers found on Shineii');
-    }
+    const episodesResponse = await axios.get(
+      `${SHINEII_URL}/api/episodes/${encodeURIComponent(animeId)}`,
+      { timeout: 15_000 },
+    );
+    const episodeResults = record(episodesResponse.data?.results);
+    const episodes = Array.isArray(episodeResults.episodes) ? episodeResults.episodes : [];
+    const selectedEpisode = episodes
+      .map(record)
+      .find((episode) => String(episode.episode_no) === String(epNum));
+    const serverIds = text(selectedEpisode?.server_ids);
+    if (!serverIds) throw new Error('Episode server IDs unavailable');
 
-    // Grab the best server linkId (Sub or Dub HD if possible)
-    let bestServer = servers.find((s: any) => s.type === 'sub' && s.name.includes('HD-1'));
-    if (!bestServer) bestServer = servers[0];
-    const linkId = bestServer.linkId || bestServer.id;
+    const serversResponse = await axios.get(`${SHINEII_URL}/api/servers`, {
+      params: { ids: serverIds },
+      timeout: 15_000,
+    });
+    const rawServers: JsonRecord[] = Array.isArray(serversResponse.data?.results)
+      ? (serversResponse.data.results as unknown[]).map(record)
+      : [];
+    if (!rawServers.length) throw new Error('No fallback servers available');
+    const selectedServer = rawServers.find((server) => text(server.name).toLowerCase().includes('hd'))
+      || rawServers[0];
+    const linkId = text(selectedServer.link_id) || text(selectedServer.id);
+    if (!linkId) throw new Error('Fallback server link ID unavailable');
 
-    // 2. Resolve the stream URL using the linkId
-    const streamRes = await axios.get(`${SHINEII_URL}/api/stream/resolve?id=${linkId}`);
-    if (!streamRes.data || !streamRes.data.success) {
-      throw new Error('Shineii API stream resolution failed');
-    }
-    
-    const streamData = streamRes.data.results;
-    
+    const streamResponse = await axios.get(`${SHINEII_URL}/api/stream`, {
+      params: { id: linkId },
+      timeout: 15_000,
+    });
+    const streamData = record(streamResponse.data?.results);
+    const embedUrl = text(streamData.url);
+    if (!embedUrl) throw new Error('Fallback embed URL unavailable');
+    const parentReferer = `${BASE_URL}/watch/${slug}/ep-${epNum}`;
+    const extracted = await extractStreamUrl(embedUrl, parentReferer)
+      || await extractStreamViaWorker(embedUrl, parentReferer, requestId);
+    if (!extracted?.m3u8) throw new Error('Fallback embed could not be resolved');
+
     const getProxyUrl = makeProxyHelper();
-
-    // Format back to Anikoto Next.js JSON format
+    const servers = rawServers.map((server) => ({
+      id: text(server.link_id) || text(server.id),
+      name: text(server.name) || 'Shineii',
+      type: text(server.type) || 'sub',
+      svId: text(server.sv_id) || undefined,
+    }));
     return {
       episode: {
         number: String(epNum),
-        title: watchData.title || `Episode ${epNum}`
+        title: text(watchData.title) || `Episode ${epNum}`,
+        href: `/watch/${slug}/ep-${epNum}`,
+        id: text(selectedEpisode?.id) || undefined,
       },
-      servers: servers,
-      stream: {
-        sources: [
-          { 
-            url: streamData.url, 
-            quality: 'auto',
-            proxyUrl: getProxyUrl(streamData.url)
-          }
-        ],
-        subtitles: streamData.subtitles || [],
-      }
+      servers,
+      sources: [{
+        server: text(selectedServer.name) || 'Shineii',
+        type: text(selectedServer.type) || 'sub',
+        url: embedUrl,
+        m3u8: extracted.m3u8,
+        referer: extracted.referer,
+        proxyUrl: getProxyUrl(extracted.m3u8, extracted.referer),
+        tracks: extracted.tracks.map((track) => ({
+          ...track,
+          proxyUrl: getProxyUrl(track.file, extracted.referer),
+        })),
+      }],
+      skip_data: streamData.skipData || {
+        intro: extracted.intro,
+        outro: extracted.outro,
+      },
     };
-  } catch (error) {
+  } catch {
     throw new Error('Shineii API watch fetch failed');
   }
 }

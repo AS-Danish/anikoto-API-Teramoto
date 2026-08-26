@@ -18,11 +18,18 @@ function environment(overrides = {}) {
   return {
     PROXY_SIGNING_SECRET: secret,
     ALLOWED_CORS_ORIGINS: allowedOrigin,
-    APPROVED_STREAM_HOSTS: 'cdn.watching.onl,*.akirax.buzz',
+    APPROVED_STREAM_HOSTS: 'cdn.watching.onl,*.akirax.buzz,*.megaplay.buzz',
     BURST_RATE_LIMITER: limiter(),
     SUSTAINED_RATE_LIMITER: limiter(),
     ...overrides,
   };
+}
+
+async function signedResolverRequest(target) {
+  const request = await signedRequest(target, { referer: 'https://anikoto.net/watch/example/ep-1' });
+  const url = new URL(request.url);
+  url.pathname = '/resolve';
+  return new Request(url, { headers: request.headers });
 }
 
 async function signedRequest(target, options = {}) {
@@ -141,4 +148,45 @@ test('returns 429 when either configured rate limit rejects the client', async (
   );
   assert.equal(response.status, 429);
   assert.equal(response.headers.get('retry-after'), '60');
+});
+
+test('resolves a signed MegaPlay embed without exposing an open resolver', async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname.startsWith('/stream/s-2/')) {
+      return new Response('<html><title>File 178952 - MegaPlay</title></html>', {
+        headers: { 'Content-Type': 'text/html' },
+      });
+    }
+    if (url.pathname === '/stream/getSources') {
+      return Response.json({
+        sources: { file: 'https://cdn.watching.onl/anime/example/master.m3u8' },
+        tracks: [{ file: 'https://cdn.watching.onl/anime/example/en.vtt', label: 'English' }],
+        intro: { start: 10, end: 20 },
+      });
+    }
+    return new Response('unexpected', { status: 500 });
+  };
+
+  const response = await worker.fetch(
+    await signedResolverRequest('https://megaplay.buzz/stream/s-2/406639/sub?s=bcdn'),
+    environment(),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.m3u8, 'https://cdn.watching.onl/anime/example/master.m3u8');
+  assert.equal(body.tracks.length, 1);
+});
+
+test('rejects unsigned and non-MegaPlay resolver requests', async () => {
+  const unsigned = await worker.fetch(
+    new Request('https://proxy.example/resolve?url=https%3A%2F%2Fmegaplay.buzz%2Fstream%2F1'),
+    environment(),
+  );
+  assert.equal(unsigned.status, 401);
+
+  const signedWrongHost = await signedResolverRequest('https://cdn.watching.onl/master.m3u8');
+  const wrongHost = await worker.fetch(signedWrongHost, environment());
+  assert.equal(wrongHost.status, 403);
 });
