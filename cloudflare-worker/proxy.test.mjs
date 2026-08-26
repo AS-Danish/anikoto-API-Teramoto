@@ -18,7 +18,7 @@ function environment(overrides = {}) {
   return {
     PROXY_SIGNING_SECRET: secret,
     ALLOWED_CORS_ORIGINS: allowedOrigin,
-    APPROVED_STREAM_HOSTS: 'cdn.watching.onl,*.akirax.buzz,*.megaplay.buzz',
+    APPROVED_STREAM_HOSTS: 'cdn.watching.onl,*.anivideo.sbs,*.akirax.buzz,*.megaplay.buzz',
     BURST_RATE_LIMITER: limiter(),
     SUSTAINED_RATE_LIMITER: limiter(),
     ...overrides,
@@ -139,6 +139,20 @@ test('rewrites every manifest child with a valid time-limited signature', async 
   assert.match(body, /URI="https:\/\/proxy\.example\//);
   assert.match(body, /url=https%3A%2F%2Fcdn\.watching\.onl%2Fpath%2Fsegment-1\.ts/);
   assert.match(body, /&exp=\d+&v=1&sig=[a-f0-9]{64}/);
+});
+
+test('rewrites approved cross-host HLS children used by watching.onl', async () => {
+  globalThis.fetch = async () => new Response(
+    '#EXTM3U\nhttps://fntb0.anivideo.sbs/media/segment-1.ts\n',
+    { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } },
+  );
+  const response = await worker.fetch(
+    await signedRequest('https://cdn.watching.onl/path/quality.m3u8'),
+    environment(),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.text();
+  assert.match(body, /url=https%3A%2F%2Ffntb0\.anivideo\.sbs%2Fmedia%2Fsegment-1\.ts/);
 });
 
 test('returns 429 when either configured rate limit rejects the client', async () => {

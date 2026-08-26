@@ -94,7 +94,14 @@ async function verifySignature(searchParams, env) {
 
 async function signedProxyUrl(workerBase, targetUrl, referer, expiresAt, env) {
   const approved = approvedTarget(targetUrl, env);
-  if (!approved) throw new Error('Refusing to sign an unapproved manifest destination');
+  if (!approved) {
+    let destination = 'invalid-url';
+    try {
+      const parsed = new URL(targetUrl);
+      destination = `${parsed.protocol}//${parsed.hostname}`;
+    } catch {}
+    throw new Error(`Refusing to sign an unapproved manifest destination (${destination})`);
+  }
   const normalizedTarget = approved.toString();
   const url = new URL(workerBase);
   url.searchParams.set('url', normalizedTarget);

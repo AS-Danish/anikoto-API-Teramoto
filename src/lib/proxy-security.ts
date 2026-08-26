@@ -10,6 +10,7 @@ const CLOCK_SKEW_SECONDS = 30;
 export const DEFAULT_APPROVED_STREAM_HOSTS = [
   'cdn.watching.onl',
   '*.watching.onl',
+  '*.anivideo.sbs',
   's1.akirax.buzz',
   '*.akirax.buzz',
   '*.mewstream.buzz',

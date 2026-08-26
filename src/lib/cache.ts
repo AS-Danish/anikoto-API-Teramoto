@@ -82,20 +82,35 @@ async function sharedSet<T>(key: string, value: T, ttl: number) {
 }
 
 async function acquireSharedLock(key: string) {
-  if (!redisUrl || !redisToken) return true;
+  const token = `${Date.now()}-${crypto.randomUUID()}`;
+  if (!redisUrl || !redisToken) return token;
   const result = await redisCommand([
     'SET',
     sharedKey(`${LOCK_PREFIX}${key}`),
-    `${Date.now()}-${Math.random()}`,
+    token,
     'NX',
     'EX',
     45,
   ]);
-  return result === 'OK';
+  // Redis being unreachable must degrade to the local cache rather than make
+  // every cold API request wait for a lock that cannot be inspected.
+  if (result === undefined) return token;
+  return result === 'OK' ? token : undefined;
+}
+
+async function releaseSharedLock(key: string, token: string) {
+  if (!redisUrl || !redisToken) return;
+  await redisCommand([
+    'EVAL',
+    'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+    1,
+    sharedKey(`${LOCK_PREFIX}${key}`),
+    token,
+  ]);
 }
 
 async function waitForSharedValue<T>(key: string) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const entry = await sharedGet<T>(key);
     if (entry && entry.freshUntil > Date.now()) return entry.value;
@@ -189,6 +204,7 @@ export async function getOrSet<T>(
 
   const promise = (async () => {
     let stale = cache.get<T>(`${STALE_PREFIX}${key}`);
+    let lockToken: string | undefined;
 
     if (!refresh) {
       const shared = await sharedGet<T>(key);
@@ -201,8 +217,8 @@ export async function getOrSet<T>(
         }
       }
 
-      const ownsLock = await acquireSharedLock(key);
-      if (!ownsLock) {
+      lockToken = await acquireSharedLock(key);
+      if (!lockToken) {
         const value = await waitForSharedValue<T>(key);
         if (value !== undefined) {
           memorySet(key, value, ttl);
@@ -210,7 +226,10 @@ export async function getOrSet<T>(
           return value;
         }
         if (stale !== undefined) return stale;
-        throw new Error('A shared refresh is still in progress.');
+        // The lock owner may be resolving a slow video host or may have died.
+        // Try to take over after waiting. If it still owns the lock, continue
+        // under the global upstream limiter instead of failing the user.
+        lockToken = await acquireSharedLock(key);
       }
     }
 
@@ -223,6 +242,8 @@ export async function getOrSet<T>(
     } catch (error) {
       if (stale !== undefined) return stale;
       throw error;
+    } finally {
+      if (lockToken) await releaseSharedLock(key, lockToken);
     }
   })().finally(() => {
     inFlight.delete(key);

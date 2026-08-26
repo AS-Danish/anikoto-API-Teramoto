@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants';
 import { makeSignedProxyUrlBuilder } from './proxy-security';
+import { playbackLog, safeHost, safePlaybackError } from './playback-diagnostics';
 
 export interface SubtitleTrack {
   file: string;
@@ -41,15 +42,38 @@ export async function extractStreamViaWorker(
   parentReferer: string,
   requestId?: string,
 ): Promise<ExtractedStream | null> {
+  const startedAt = Date.now();
   try {
     const signedProxyUrl = makeSignedProxyUrlBuilder()(embedUrl, parentReferer);
     const resolverUrl = new URL(signedProxyUrl);
     resolverUrl.pathname = '/resolve';
-    const { data } = await axios.get<WorkerResolveResponse>(resolverUrl.toString(), {
+    playbackLog(requestId || 'untracked', 'worker.resolve_request', {
+      workerHost: resolverUrl.hostname,
+      embedHost: safeHost(embedUrl),
+    });
+    const { data, status, headers } = await axios.get<WorkerResolveResponse>(resolverUrl.toString(), {
       headers: requestId ? { 'X-Playback-Request-Id': requestId } : undefined,
       timeout: 12_000,
     });
-    if (data?.ok !== true || typeof data.m3u8 !== 'string' || !data.m3u8) return null;
+    if (data?.ok !== true || typeof data.m3u8 !== 'string' || !data.m3u8) {
+      playbackLog(requestId || 'untracked', 'worker.resolve_invalid_response', {
+        workerHost: resolverUrl.hostname,
+        embedHost: safeHost(embedUrl),
+        status,
+        contentType: String(headers['content-type'] || '').slice(0, 100),
+        responseOk: data?.ok === true,
+        hasMedia: Boolean(data?.m3u8),
+        elapsedMs: Date.now() - startedAt,
+      }, 'warn');
+      return null;
+    }
+    playbackLog(requestId || 'untracked', 'worker.resolve_succeeded', {
+      workerHost: resolverUrl.hostname,
+      embedHost: safeHost(embedUrl),
+      mediaHost: safeHost(data.m3u8),
+      captionCount: Array.isArray(data.tracks) ? data.tracks.length : 0,
+      elapsedMs: Date.now() - startedAt,
+    });
     return {
       m3u8: data.m3u8,
       referer: typeof data.referer === 'string' && data.referer
@@ -59,7 +83,12 @@ export async function extractStreamViaWorker(
       intro: data.intro,
       outro: data.outro,
     };
-  } catch {
+  } catch (error) {
+    playbackLog(requestId || 'untracked', 'worker.resolve_failed', {
+      embedHost: safeHost(embedUrl),
+      elapsedMs: Date.now() - startedAt,
+      error: safePlaybackError(error),
+    }, 'warn');
     return null;
   }
 }
