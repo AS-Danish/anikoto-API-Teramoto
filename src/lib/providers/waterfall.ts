@@ -4,16 +4,14 @@ import { getConsumetAnime, getConsumetWatch } from './consumet.provider';
 import { getShineiiAnime, getShineiiWatch } from './shineii.provider';
 import { getAnilistAnime, getAnilistWatch } from './anilist.provider';
 import { playbackLog, safePlaybackError } from '../playback-diagnostics';
+import { hasMediaSource } from '../playable-source';
+import { createSourceProbe } from '../media-health';
+import { withDeadline } from '../deadline';
 
 export function hasPlayableWatchData(data: unknown): data is WatchData {
   if (!data || typeof data !== 'object') return false;
   const sources = (data as { sources?: unknown }).sources;
-  return Array.isArray(sources) && sources.some((source) => {
-    if (!source || typeof source !== 'object') return false;
-    const candidate = source as { proxyUrl?: unknown; m3u8?: unknown; url?: unknown };
-    return [candidate.proxyUrl, candidate.m3u8, candidate.url]
-      .some((value) => typeof value === 'string' && value.trim().length > 0);
-  });
+  return Array.isArray(sources) && sources.some(hasMediaSource);
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -159,7 +157,9 @@ export async function waterfallAnimeDetail(slug: string, startEpisode?: number, 
   throw new Error('All waterfall providers failed to fetch anime details for slug: ' + slug);
 }
 
-export async function waterfallWatch(slug: string, epNum: string, requestId = 'untracked') {
+export async function waterfallWatch(slug: string, epNum: string, requestId = 'untracked', startAt = 0, budgetMs = 80_000) {
+  const probe = createSourceProbe(requestId);
+  const deadline = Date.now() + budgetMs;
   const attempts: Array<{
     name: string;
     source: string;
@@ -188,18 +188,27 @@ export async function waterfallWatch(slug: string, epNum: string, requestId = 'u
   ];
 
   for (const [index, attempt] of attempts.entries()) {
+    if (index < startAt) continue;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
     const startedAt = Date.now();
     playbackLog(requestId, 'provider.attempt_started', {
       provider: attempt.name,
       order: index + 1,
     });
     try {
-      const data = requirePlayableWatchData(
-        attempt.name,
-        slug,
-        epNum,
-        await attempt.load(),
-      );
+      const data = await withDeadline((async () => {
+        const candidate = requirePlayableWatchData(
+          attempt.name,
+          slug,
+          epNum,
+          await attempt.load(),
+        );
+        const checks = await Promise.all(candidate.sources.map((source) => hasMediaSource(source) ? probe(source) : false));
+        const sources = candidate.sources.filter((_, index) => checks[index]);
+        if (!sources.length) throw new Error(`${attempt.name} returned no reachable media`);
+        return { ...candidate, sources };
+      })(), Math.min(index === 0 ? 40_000 : 25_000, remaining));
       playbackLog(requestId, 'provider.attempt_succeeded', {
         provider: attempt.name,
         sourceCount: data.sources.length,

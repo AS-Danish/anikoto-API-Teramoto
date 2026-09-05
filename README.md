@@ -117,7 +117,7 @@ CORS_ALLOWED_ORIGIN=http://localhost:3000,https://your-luffy-tv-domain.example
 CF_WORKER_URL=https://aonime-proxy.luffytv.workers.dev
 PROXY_SIGNING_SECRET=replace-with-a-random-secret-of-at-least-32-characters
 PROXY_URL_TTL_SECONDS=7200
-APPROVED_STREAM_HOSTS=cdn.watching.onl,*.watching.onl,s1.akirax.buzz,*.akirax.buzz,*.mewstream.buzz,*.zaplume.buzz,*.megaplay.buzz,*.megacloud.tv,*.gogocdn.net,*.gogoplay4.com,*.vidstreaming.io,*.vidcloud9.com,*.embtaku.pro
+APPROVED_EMBED_HOSTS=megaplay.buzz,*.megaplay.buzz
 
 # Recommended: shared cache for serverless/multi-instance deployments
 UPSTASH_REDIS_REST_URL=https://your-database.upstash.io
@@ -143,8 +143,10 @@ between separate serverless instances.
 The API is the only component allowed to mint stream URLs. Every proxy URL is
 HMAC-signed, expires after two hours by default, and binds the target URL,
 referer, expiry, and signature version. The Worker also enforces exact CORS
-origins, approved streaming hosts, private/local-address blocking, redirect
-validation, and per-client burst and sustained rate limits.
+origins, approved embed providers, private/local-address blocking, redirect
+validation, and per-client burst and sustained rate limits. Media CDN URLs are
+authorized by their exact short-lived signatures instead of a static hostname
+list, so provider CDN rotation does not interrupt playback.
 
 1. Generate one 32-byte secret. On Windows PowerShell (including older Windows
    PowerShell versions):
@@ -163,13 +165,14 @@ validation, and per-client burst and sustained rate limits.
    npx wrangler@latest secret put PROXY_SIGNING_SECRET
    ```
 3. In `cloudflare-worker/wrangler.jsonc`, replace `ALLOWED_CORS_ORIGINS` with
-   the exact production Luffy TV origin plus the two localhost origins. Add a
-   streaming hostname to `APPROVED_STREAM_HOSTS` only after observing it from a
-   trusted provider response.
+   the exact production Luffy TV origin plus the two localhost origins. Keep
+   `APPROVED_EMBED_HOSTS` restricted to providers whose HTML/API responses the
+   resolver understands; media CDNs do not belong in this list.
 4. In Vercel, configure `CF_WORKER_URL`, `PROXY_SIGNING_SECRET`,
-   `PROXY_URL_TTL_SECONDS`, `APPROVED_STREAM_HOSTS`, and exact
+   `PROXY_URL_TTL_SECONDS`, `APPROVED_EMBED_HOSTS`, and exact
    `CORS_ALLOWED_ORIGIN` values from `.env.example`.
-5. Deploy the API first, then deploy the Worker:
+5. Deploy the Worker first, then deploy the API so the dynamic media policy is
+   active before the API begins issuing URLs for newly discovered CDNs:
    ```powershell
    cd cloudflare-worker
    npm run check

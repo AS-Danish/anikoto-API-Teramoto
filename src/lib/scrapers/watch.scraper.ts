@@ -86,15 +86,21 @@ export type WatchStreamChunk =
   | WatchStreamDone;
 
 /** Cap individual server fetch+extraction so a single slow server can't block everything. */
-const SERVER_TIMEOUT_MS = 8000;
+// Include the AJAX request, primary extraction and the 12s Worker fallback.
+const SERVER_TIMEOUT_MS = 30_000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timed out after ${ms}ms (${label})`)), ms)
-    ),
-  ]);
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms (${label})`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function makeProxyHelper() {
@@ -120,6 +126,30 @@ function parseSkipData(skipData: unknown): { intro?: IntroOutro; outro?: IntroOu
     }
   }
   return result;
+}
+
+function tryProxyUrl(
+  url: string | undefined,
+  referer: string | undefined,
+  getProxyUrl: (url: string, referer?: string) => string,
+  requestId: string,
+  server: string,
+  kind: 'media' | 'caption',
+) {
+  if (!url) return null;
+  try {
+    return getProxyUrl(url, referer);
+  } catch (error) {
+    // A rotating caption/CDN hostname must not discard the entire playable
+    // server. Keep the direct URL as a fallback and record only its hostname.
+    playbackLog(requestId, 'scraper.proxy_signing_skipped', {
+      server,
+      kind,
+      host: safeHost(url),
+      error: safePlaybackError(error),
+    }, 'warn');
+    return null;
+  }
 }
 
 /** Build all per-server extraction promises, each resolving to a VideoSource and its skip ranges, or null. */
@@ -204,17 +234,33 @@ function buildSourceTasks(
             }, extracted ? 'info' : 'warn');
           }
 
+          if (!extracted?.m3u8) return null;
+
           const source: VideoSource = {
             server: server.name,
             type: server.type,
             url: embedUrl,
             m3u8: extracted?.m3u8 ?? null,
             referer: extracted?.referer,
-            proxyUrl: extracted?.m3u8 ? getProxyUrl(extracted.m3u8, extracted.referer) : null,
-            tracks: extracted?.tracks?.map((t) => ({
-              ...t,
-              proxyUrl: getProxyUrl(t.file, extracted!.referer),
-            })) || [],
+            proxyUrl: tryProxyUrl(
+              extracted?.m3u8,
+              extracted?.referer,
+              getProxyUrl,
+              requestId,
+              server.name,
+              'media',
+            ),
+            tracks: extracted?.tracks?.map((track) => {
+              const proxyUrl = tryProxyUrl(
+                track.file,
+                extracted?.referer,
+                getProxyUrl,
+                requestId,
+                server.name,
+                'caption',
+              );
+              return proxyUrl ? { ...track, proxyUrl } : { ...track };
+            }) || [],
           };
           playbackLog(requestId, 'scraper.server_resolved', {
             server: server.name,

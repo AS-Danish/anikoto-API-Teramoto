@@ -18,7 +18,7 @@ function environment(overrides = {}) {
   return {
     PROXY_SIGNING_SECRET: secret,
     ALLOWED_CORS_ORIGINS: allowedOrigin,
-    APPROVED_STREAM_HOSTS: 'cdn.watching.onl,*.anivideo.sbs,*.akirax.buzz,*.megaplay.buzz',
+    APPROVED_EMBED_HOSTS: 'megaplay.buzz,*.megaplay.buzz',
     BURST_RATE_LIMITER: limiter(),
     SUSTAINED_RATE_LIMITER: limiter(),
     ...overrides,
@@ -92,11 +92,13 @@ test('rejects unsigned and expired URLs', async () => {
   assert.equal(expired.status, 401);
 });
 
-test('blocks local addresses and unapproved public hosts before fetch', async () => {
+test('blocks local addresses but accepts HMAC-authorized public media hosts', async () => {
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
-    return new Response('unexpected');
+    return new Response('media', {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
   };
 
   const privateResponse = await worker.fetch(
@@ -105,24 +107,46 @@ test('blocks local addresses and unapproved public hosts before fetch', async ()
   );
   assert.equal(privateResponse.status, 403);
 
-  const unapprovedResponse = await worker.fetch(
-    await signedRequest('https://example.com/video.ts'),
+  const dynamicCdnResponse = await worker.fetch(
+    await signedRequest('https://brand-new-cdn.example/video.ts'),
     environment(),
   );
-  assert.equal(unapprovedResponse.status, 403);
-  assert.equal(calls, 0);
+  assert.equal(dynamicCdnResponse.status, 200);
+  assert.equal(calls, 1);
 });
 
-test('rejects redirects to destinations outside the approved host list', async () => {
+test('rejects redirects to unsafe destinations', async () => {
   globalThis.fetch = async () => new Response(null, {
     status: 302,
-    headers: { Location: 'https://example.com/private.ts' },
+    headers: { Location: 'https://127.0.0.1/private.ts' },
   });
   const response = await worker.fetch(
     await signedRequest('https://cdn.watching.onl/master.m3u8'),
     environment(),
   );
   assert.equal(response.status, 502);
+});
+
+test('follows redirects to newly discovered public media hosts', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(null, {
+        status: 302,
+        headers: { Location: 'https://future-cdn.example/video.ts' },
+      });
+    }
+    return new Response('media', {
+      headers: { 'Content-Type': 'video/mp2t' },
+    });
+  };
+  const response = await worker.fetch(
+    await signedRequest('https://cdn.watching.onl/video.ts'),
+    environment(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
 });
 
 test('rewrites every manifest child with a valid time-limited signature', async () => {
@@ -141,9 +165,9 @@ test('rewrites every manifest child with a valid time-limited signature', async 
   assert.match(body, /&exp=\d+&v=1&sig=[a-f0-9]{64}/);
 });
 
-test('rewrites approved cross-host HLS children used by watching.onl', async () => {
+test('rewrites newly discovered cross-host HLS children', async () => {
   globalThis.fetch = async () => new Response(
-    '#EXTM3U\nhttps://fntb0.anivideo.sbs/media/segment-1.ts\n',
+    '#EXTM3U\nhttps://future-cdn.example/media/segment-1.ts\n',
     { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } },
   );
   const response = await worker.fetch(
@@ -152,7 +176,20 @@ test('rewrites approved cross-host HLS children used by watching.onl', async () 
   );
   assert.equal(response.status, 200);
   const body = await response.text();
-  assert.match(body, /url=https%3A%2F%2Ffntb0\.anivideo\.sbs%2Fmedia%2Fsegment-1\.ts/);
+  assert.match(body, /url=https%3A%2F%2Ffuture-cdn\.example%2Fmedia%2Fsegment-1\.ts/);
+});
+
+test('accepts rotating lostproject media CDN subdomains', async () => {
+  globalThis.fetch = async () => new Response('#EXTM3U\n#EXT-X-ENDLIST\n', {
+    status: 200,
+    headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+  });
+
+  const response = await worker.fetch(
+    await signedRequest('https://1oe.lostproject.club/anime/master.m3u8'),
+    environment(),
+  );
+  assert.equal(response.status, 200);
 });
 
 test('returns 429 when either configured rate limit rejects the client', async () => {
@@ -174,8 +211,8 @@ test('resolves a signed MegaPlay embed without exposing an open resolver', async
     }
     if (url.pathname === '/stream/getSources') {
       return Response.json({
-        sources: { file: 'https://cdn.watching.onl/anime/example/master.m3u8' },
-        tracks: [{ file: 'https://cdn.watching.onl/anime/example/en.vtt', label: 'English' }],
+        sources: { file: 'https://future-media.example/anime/example/master.m3u8' },
+        tracks: [{ file: 'https://future-captions.example/anime/example/en.vtt', label: 'English' }],
         intro: { start: 10, end: 20 },
       });
     }
@@ -189,7 +226,7 @@ test('resolves a signed MegaPlay embed without exposing an open resolver', async
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.ok, true);
-  assert.equal(body.m3u8, 'https://cdn.watching.onl/anime/example/master.m3u8');
+  assert.equal(body.m3u8, 'https://future-media.example/anime/example/master.m3u8');
   assert.equal(body.tracks.length, 1);
 });
 

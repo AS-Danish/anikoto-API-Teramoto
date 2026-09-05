@@ -48,21 +48,23 @@ export async function getConsumetAnime(slug: string) {
   }
 }
 
+const watchHttp = axios.create({ timeout: 10_000 });
+
 export async function getConsumetWatch(slug: string, epNum: string) {
   try {
-    const searchRes = await axios.get(`${CONSUMET_URL}/${slug}`);
+    const searchRes = await watchHttp.get(`${CONSUMET_URL}/${slug}`);
     if (!searchRes.data || !searchRes.data.results || searchRes.data.results.length === 0) {
       throw new Error('Anime not found on Consumet');
     }
 
     const consumetId = searchRes.data.results[0].id;
-    const infoRes = await axios.get(`${CONSUMET_URL}/info/${consumetId}`);
+    const infoRes = await watchHttp.get(`${CONSUMET_URL}/info/${consumetId}`);
     const episodes = infoRes.data.episodes || [];
     
     const episode = episodes.find((ep: any) => String(ep.number) === String(epNum));
     if (!episode) throw new Error('Episode not found on Consumet');
 
-    const watchRes = await axios.get(`${CONSUMET_URL}/watch/${episode.id}`);
+    const watchRes = await watchHttp.get(`${CONSUMET_URL}/watch/${episode.id}`);
     
     const getProxyUrl = makeProxyHelper();
     const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";

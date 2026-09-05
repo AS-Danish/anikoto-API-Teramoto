@@ -7,21 +7,9 @@ const DEFAULT_PROXY_TTL_SECONDS = 2 * 60 * 60;
 const MAX_PROXY_TTL_SECONDS = 6 * 60 * 60;
 const CLOCK_SKEW_SECONDS = 30;
 
-export const DEFAULT_APPROVED_STREAM_HOSTS = [
-  'cdn.watching.onl',
-  '*.watching.onl',
-  '*.anivideo.sbs',
-  's1.akirax.buzz',
-  '*.akirax.buzz',
-  '*.mewstream.buzz',
-  '*.zaplume.buzz',
+export const DEFAULT_APPROVED_EMBED_HOSTS = [
+  'megaplay.buzz',
   '*.megaplay.buzz',
-  '*.megacloud.tv',
-  '*.gogocdn.net',
-  '*.gogoplay4.com',
-  '*.vidstreaming.io',
-  '*.vidcloud9.com',
-  '*.embtaku.pro',
 ].join(',');
 
 function positiveInteger(value: string | undefined, fallback: number) {
@@ -70,8 +58,8 @@ export function buildSignedProxyUrl(
 ) {
   const normalizedBase = proxyBase.trim();
   if (!normalizedBase) throw new Error('A proxy base URL is required.');
-  if (!parseApprovedProxyTarget(targetUrl)) {
-    throw new Error('Refusing to sign an unapproved streaming destination.');
+  if (!parseSafeMediaTarget(targetUrl)) {
+    throw new Error('Refusing to sign an unsafe streaming destination.');
   }
   const params = new URLSearchParams({
     url: targetUrl,
@@ -152,10 +140,15 @@ export function isPrivateOrLocalHostname(hostname: string) {
 }
 
 function approvedHostPatterns() {
-  return (process.env.APPROVED_STREAM_HOSTS || DEFAULT_APPROVED_STREAM_HOSTS)
+  // Keep the built-in CDN list active even when a deployment has an older
+  // APPROVED_STREAM_HOSTS value. The environment variable is additive so a
+  // stale Vercel setting cannot silently remove hosts added by an application
+  // update.
+  const configured = process.env.APPROVED_EMBED_HOSTS || process.env.APPROVED_STREAM_HOSTS || '';
+  return `${DEFAULT_APPROVED_EMBED_HOSTS},${configured}`
     .split(',')
     .map((host) => host.trim().toLowerCase().replace(/\.$/, ''))
-    .filter(Boolean);
+    .filter((host, index, hosts) => Boolean(host) && hosts.indexOf(host) === index);
 }
 
 function hostMatches(hostname: string, pattern: string) {
@@ -166,7 +159,12 @@ function hostMatches(hostname: string, pattern: string) {
   return hostname === pattern;
 }
 
-export function parseApprovedProxyTarget(value: string) {
+/**
+ * Validates media discovered by a trusted server-side extractor. Media CDN
+ * hostnames rotate, so the short-lived HMAC is the authorization boundary;
+ * this function enforces the URL-level SSRF protections.
+ */
+export function parseSafeMediaTarget(value: string) {
   if (!value || value.length > 8_192) return null;
   try {
     const target = new URL(value);
@@ -174,11 +172,20 @@ export function parseApprovedProxyTarget(value: string) {
     if (target.protocol !== 'https:' || target.username || target.password || isPrivateOrLocalHostname(hostname)) {
       return null;
     }
-    if (!approvedHostPatterns().some((pattern) => hostMatches(hostname, pattern))) return null;
     return target;
   } catch {
     return null;
   }
+}
+
+/** Strict hostname approval for HTML/embed endpoints used by extractors. */
+export function parseApprovedEmbedTarget(value: string) {
+  const target = parseSafeMediaTarget(value);
+  if (!target) return null;
+  const hostname = target.hostname.toLowerCase().replace(/\.$/, '');
+  return approvedHostPatterns().some((pattern) => hostMatches(hostname, pattern))
+    ? target
+    : null;
 }
 
 type JsonObject = Record<string, unknown>;

@@ -70,22 +70,24 @@ export async function getAnilistAnime(slug: string) {
   }
 }
 
+const watchHttp = axios.create({ timeout: 10_000 });
+
 export async function getAnilistWatch(slug: string, epNum: string) {
   // Use a secondary Consumet instance for GogoAnime streams as the final fallback
   try {
-    const searchRes = await axios.get(`${GOGOANIME_CONSUMET_URL}/${slug}`);
+    const searchRes = await watchHttp.get(`${GOGOANIME_CONSUMET_URL}/${slug}`);
     if (!searchRes.data || !searchRes.data.results || searchRes.data.results.length === 0) {
       throw new Error('Anime not found on GogoAnime Fallback');
     }
 
     const gogoId = searchRes.data.results[0].id;
-    const infoRes = await axios.get(`${GOGOANIME_CONSUMET_URL}/info/${gogoId}`);
+    const infoRes = await watchHttp.get(`${GOGOANIME_CONSUMET_URL}/info/${gogoId}`);
     const episodes = infoRes.data.episodes || [];
     
     const episode = episodes.find((ep: any) => String(ep.number) === String(epNum));
     if (!episode) throw new Error('Episode not found on GogoAnime Fallback');
 
-    const watchRes = await axios.get(`${GOGOANIME_CONSUMET_URL}/watch/${episode.id}`);
+    const watchRes = await watchHttp.get(`${GOGOANIME_CONSUMET_URL}/watch/${episode.id}`);
     
     const getProxyUrl = makeProxyHelper();
     const referer = watchRes.data.headers?.Referer || "https://gogoanime.co/";

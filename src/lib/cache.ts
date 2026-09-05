@@ -191,7 +191,8 @@ export async function getOrSet<T>(
   key: string,
   fetcher: () => Promise<T>,
   ttl: number,
-  refresh = false
+  refresh = false,
+  allowStale = true,
 ): Promise<T> {
   if (!refresh) {
     const cached = cache.get<T>(key);
@@ -199,7 +200,8 @@ export async function getOrSet<T>(
   }
 
   // Coalesce the entire lookup/fetch pipeline, including shared-cache reads.
-  const existing = inFlight.get(key);
+  const flightKey = allowStale ? key : `fresh:${key}`;
+  const existing = inFlight.get(flightKey);
   if (existing) return existing as Promise<T>;
 
   const promise = (async () => {
@@ -225,7 +227,7 @@ export async function getOrSet<T>(
           memorySet(`${STALE_PREFIX}${key}`, value, Math.max(ttl * 6, 60 * 60));
           return value;
         }
-        if (stale !== undefined) return stale;
+        if (allowStale && stale !== undefined) return stale;
         // The lock owner may be resolving a slow video host or may have died.
         // Try to take over after waiting. If it still owns the lock, continue
         // under the global upstream limiter instead of failing the user.
@@ -240,16 +242,16 @@ export async function getOrSet<T>(
       await sharedSet(key, fresh, ttl);
       return fresh;
     } catch (error) {
-      if (stale !== undefined) return stale;
+      if (allowStale && stale !== undefined) return stale;
       throw error;
     } finally {
       if (lockToken) await releaseSharedLock(key, lockToken);
     }
   })().finally(() => {
-    inFlight.delete(key);
+    inFlight.delete(flightKey);
   });
 
-  inFlight.set(key, promise);
+  inFlight.set(flightKey, promise);
   return promise;
 }
 
@@ -268,4 +270,21 @@ export async function cacheSet<T>(key: string, value: T, ttl: number): Promise<v
   memorySet(key, value, ttl);
   memorySet(`${STALE_PREFIX}${key}`, value, Math.max(ttl * 6, 60 * 60));
   await sharedSet(key, value, ttl);
+}
+
+/** Atomic shared admission limit; per-instance protection if Redis is absent. */
+export async function consumeRateLimit(key: string, limit: number, seconds: number): Promise<boolean> {
+  const result = await redisCommand([
+    'EVAL',
+    'local n=redis.call("INCR",KEYS[1]); if n==1 then redis.call("EXPIRE",KEYS[1],ARGV[1]) end; return n',
+    1, sharedKey(`rate:${key}`), seconds,
+  ]);
+  if (typeof result === 'number') return result <= limit;
+  const localKey = `rate:${key}`;
+  const entry = cache.get<{ count: number; until: number }>(localKey);
+  const now = Date.now();
+  const current = entry && entry.until > now ? entry : { count: 0, until: now + seconds * 1000 };
+  current.count += 1;
+  memorySet(localKey, current, Math.max(1, Math.ceil((current.until - now) / 1000)));
+  return current.count <= limit;
 }

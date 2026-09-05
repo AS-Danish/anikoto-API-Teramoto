@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+/cloudflare-worker/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -51,3 +52,4 @@ test_schedule.js
 /cloudflare-worker/.dev.vars
 /cloudflare-worker/.dev.vars.*
 !/cloudflare-worker/.dev.vars.example
+.env*

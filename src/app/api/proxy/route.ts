@@ -1,6 +1,6 @@
 import {
   buildSignedProxyUrl,
-  parseApprovedProxyTarget,
+  parseSafeMediaTarget,
   verifyProxySignature,
 } from '@/lib/proxy-security';
 import {
@@ -31,7 +31,7 @@ function isRedirect(status: number) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function fetchApprovedTarget(target: URL, headers: Headers) {
+async function fetchSafeTarget(target: URL, headers: Headers) {
   let current = target;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
     const response = await fetch(current, {
@@ -41,8 +41,8 @@ async function fetchApprovedTarget(target: URL, headers: Headers) {
     });
     if (!isRedirect(response.status)) return { response, finalUrl: current };
     const location = response.headers.get('location');
-    const redirected = location ? parseApprovedProxyTarget(new URL(location, current).toString()) : null;
-    if (!redirected) throw new Error('The upstream redirect destination is not approved.');
+    const redirected = location ? parseSafeMediaTarget(new URL(location, current).toString()) : null;
+    if (!redirected) throw new Error('The upstream redirect destination is unsafe.');
     current = redirected;
   }
   throw new Error('The upstream returned too many redirects.');
@@ -71,10 +71,7 @@ async function readTextWithLimit(response: Response, maximumBytes: number) {
 }
 
 function normalizeManifestUrl(value: string, manifestUrl: URL) {
-  const resolved = new URL(value, manifestUrl);
-  const host = resolved.hostname.toLowerCase();
-  if (host.endsWith('.buzz') || host.endsWith('.click')) resolved.host = manifestUrl.host;
-  return resolved.toString();
+  return new URL(value, manifestUrl).toString();
 }
 
 function responseHeaders(contentType: string, cacheControl: string) {
@@ -95,10 +92,10 @@ export async function GET(request: Request) {
     return jsonError('The proxy URL is invalid or has expired.', 401, requestId);
   }
 
-  const target = parseApprovedProxyTarget(requestUrl.searchParams.get('url') || '');
+  const target = parseSafeMediaTarget(requestUrl.searchParams.get('url') || '');
   if (!target) {
     playbackLog(requestId, 'proxy.target_rejected', {}, 'warn');
-    return jsonError('The streaming destination is not approved.', 403, requestId);
+    return jsonError('The streaming destination is unsafe.', 403, requestId);
   }
 
   const referer = requestUrl.searchParams.get('referer') || '';
@@ -122,7 +119,7 @@ export async function GET(request: Request) {
   if (range) upstreamHeaders.set('Range', range);
 
   try {
-    const { response: upstream, finalUrl } = await fetchApprovedTarget(target, upstreamHeaders);
+    const { response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders);
     if (!upstream.ok) {
       playbackLog(requestId, 'proxy.upstream_rejected', {
         targetHost: target.hostname,

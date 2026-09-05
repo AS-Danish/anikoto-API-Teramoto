@@ -1,8 +1,9 @@
 import { scrapeWatchStream, WatchData } from '@/lib/scrapers/watch.scraper';
 import { hasPlayableWatchData, waterfallWatch } from '@/lib/providers/waterfall';
 import { cacheGet, cacheSet, getOrSet } from '@/lib/cache';
-import { CACHE_TTL } from '@/lib/constants';
-import { cacheHeaders, canBypassCache, noStoreHeaders, validSlug } from '@/lib/api-cache';
+import { canBypassCache, noStoreHeaders, validSlug } from '@/lib/api-cache';
+import { recoverWatch, WATCH_TTL, watchCacheKey } from '@/lib/watch-recovery';
+import { createSourceProbe } from '@/lib/media-health';
 import { withFreshProxyUrls } from '@/lib/proxy-security';
 import {
   playbackLog,
@@ -11,6 +12,7 @@ import {
 } from '@/lib/playback-diagnostics';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 120;
 
 /**
  * GET /api/watch/[slug]?ep=1
@@ -38,7 +40,7 @@ export async function GET(
     const { searchParams } = new URL(req.url);
     const resolvedParams = await params;
     const slug = resolvedParams.slug;
-    const epNum = searchParams.get('ep') || '1';
+    let epNum = searchParams.get('ep') || '1';
     const refreshRequested = searchParams.get('refresh') === '1';
     const isStream = searchParams.get('stream') !== 'false';
 
@@ -50,8 +52,19 @@ export async function GET(
       return Response.json({ ok: false, message: 'Cache refresh is not authorized.' }, { status: 403, headers: noStoreHeaders });
     }
     const refresh = refreshRequested;
+    epNum = String(parsedEpisode);
 
-    const cacheKey = `watch:${slug}:${epNum}`;
+    if (searchParams.get('recover') === '1') {
+      const recovered = await recoverWatch(slug, epNum, requestId);
+      return Response.json(recovered.ok
+        ? { ok: true, data: withFreshProxyUrls(recovered.data), streaming: false }
+        : { ok: false, message: recovered.message, requestId }, {
+        status: recovered.ok ? 200 : recovered.status,
+        headers: { ...noStoreHeaders, 'X-Playback-Request-Id': requestId, ...(!recovered.ok ? { 'Retry-After': '30' } : {}) },
+      });
+    }
+
+    const cacheKey = watchCacheKey(slug, epNum);
     playbackLog(requestId, 'api.watch.request', {
       slug,
       episode: epNum,
@@ -70,7 +83,7 @@ export async function GET(
         });
         return Response.json(
           { ok: true, data: withFreshProxyUrls(cached), streaming: false },
-          { headers: { ...cacheHeaders(60, 120), 'X-Playback-Request-Id': requestId } },
+          { headers: { ...noStoreHeaders, 'X-Playback-Request-Id': requestId } },
         );
       }
       if (cached !== undefined) {
@@ -83,8 +96,9 @@ export async function GET(
       let data = await getOrSet(
         cacheKey,
         () => waterfallWatch(slug, epNum, requestId),
-        CACHE_TTL.EPISODE,
+        WATCH_TTL,
         refresh,
+        false,
       );
       // Older deployments could cache an empty source list as a successful
       // response. Bypass that poisoned value once and replace it with a valid
@@ -93,8 +107,9 @@ export async function GET(
         data = await getOrSet(
           cacheKey,
           () => waterfallWatch(slug, epNum, requestId),
-          CACHE_TTL.EPISODE,
+          WATCH_TTL,
           true,
+          false,
         );
       }
       if (!hasPlayableWatchData(data)) {
@@ -115,7 +130,7 @@ export async function GET(
       });
       return Response.json(
         { ok: true, data: withFreshProxyUrls(data), streaming: false },
-        { headers: { ...cacheHeaders(60, 120), 'X-Playback-Request-Id': requestId } },
+        { headers: { ...noStoreHeaders, 'X-Playback-Request-Id': requestId } },
       );
     }
 
@@ -124,6 +139,7 @@ export async function GET(
 
     const stream = new ReadableStream({
       async start(controller) {
+        const probe = createSourceProbe(requestId);
         const collectedSources: WatchData['sources'] = [];
         let episode: WatchData['episode'] | undefined;
         let servers: WatchData['servers'] = [];
@@ -131,9 +147,6 @@ export async function GET(
 
         try {
           for await (const chunk of scrapeWatchStream(slug, epNum, requestId)) {
-            // Forward each chunk in SSE format
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-
             // Accumulate data to cache when complete
             if (chunk.type === 'episode') {
               episode = chunk.episode;
@@ -142,14 +155,27 @@ export async function GET(
             } else if (chunk.type === 'skip_data') {
               skip_data = chunk.skip_data;
             } else if (chunk.type === 'source') {
+              if (!await probe(chunk.source)) continue;
               collectedSources.push(chunk.source);
             } else if (chunk.type === 'done') {
+              if (collectedSources.length === 0) {
+                const fallback = await waterfallWatch(slug, epNum, requestId, 1, Math.max(1, 110_000 - (Date.now() - startedAt)));
+                episode = fallback.episode;
+                servers = fallback.servers;
+                skip_data = fallback.skip_data;
+                for (const source of fallback.sources) {
+                  collectedSources.push(source);
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'source', source })}\n\n`));
+                }
+              }
               // Persist completed result so the next request is an instant cache hit
               if (episode) {
                 const fullData: WatchData = { episode, skip_data, servers, sources: collectedSources };
                 if (hasPlayableWatchData(fullData)) {
-                  await cacheSet(cacheKey, fullData, CACHE_TTL.EPISODE);
+                  await cacheSet(cacheKey, fullData, WATCH_TTL);
                 } else {
+                  // Emit the failure before the terminal event. Clients are
+                  // allowed to stop consuming as soon as they receive `done`.
                   controller.enqueue(
                     encoder.encode(`data: ${JSON.stringify({
                       type: 'error',
@@ -160,6 +186,9 @@ export async function GET(
                 }
               }
             }
+
+            // Forward the terminal `done` only after any final error event.
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Unknown error';

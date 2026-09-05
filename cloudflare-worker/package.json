@@ -4,7 +4,10 @@
   "type": "module",
   "scripts": {
     "test": "node proxy.test.mjs",
-    "check": "npx wrangler@latest deploy --dry-run",
-    "deploy": "npx wrangler@latest deploy"
+    "check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.1"
   }
 }

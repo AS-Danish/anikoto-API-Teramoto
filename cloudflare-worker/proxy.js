@@ -93,16 +93,16 @@ async function verifySignature(searchParams, env) {
 }
 
 async function signedProxyUrl(workerBase, targetUrl, referer, expiresAt, env) {
-  const approved = approvedTarget(targetUrl, env);
-  if (!approved) {
+  const safeTarget = safeMediaTarget(targetUrl);
+  if (!safeTarget) {
     let destination = 'invalid-url';
     try {
       const parsed = new URL(targetUrl);
       destination = `${parsed.protocol}//${parsed.hostname}`;
     } catch {}
-    throw new Error(`Refusing to sign an unapproved manifest destination (${destination})`);
+    throw new Error(`Refusing to sign an unsafe manifest destination (${destination})`);
   }
-  const normalizedTarget = approved.toString();
+  const normalizedTarget = safeTarget.toString();
   const url = new URL(workerBase);
   url.searchParams.set('url', normalizedTarget);
   url.searchParams.set('exp', String(expiresAt));
@@ -158,6 +158,19 @@ function hostMatches(hostname, pattern) {
 }
 
 function approvedTarget(value, env) {
+  const target = safeMediaTarget(value);
+  if (!target) return null;
+  const hostname = target.hostname.toLowerCase().replace(/\.$/, '');
+  const approvedEmbeds = env.APPROVED_EMBED_HOSTS || env.APPROVED_STREAM_HOSTS;
+  return splitList(approvedEmbeds).some((pattern) => hostMatches(hostname, pattern))
+    ? target
+    : null;
+}
+
+// Media URLs are authorized by a short-lived HMAC generated only by the API
+// or this Worker while parsing an already-authorized HLS manifest. Their CDN
+// hostnames are intentionally dynamic; URL-level SSRF protections remain.
+function safeMediaTarget(value) {
   if (!value || value.length > 8_192) return null;
   try {
     const target = new URL(value);
@@ -165,7 +178,6 @@ function approvedTarget(value, env) {
     if (target.protocol !== 'https:' || target.username || target.password || isPrivateOrLocalHostname(hostname)) {
       return null;
     }
-    if (!splitList(env.APPROVED_STREAM_HOSTS).some((pattern) => hostMatches(hostname, pattern))) return null;
     return target;
   } catch {
     return null;
@@ -176,17 +188,25 @@ function isRedirect(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function fetchApprovedTarget(target, headers, env) {
+async function fetchValidatedTarget(target, headers, env, validate) {
   let current = target;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
     const response = await fetch(current, { headers, redirect: 'manual' });
     if (!isRedirect(response.status)) return { response, finalUrl: current };
     const location = response.headers.get('location');
-    const redirected = location ? approvedTarget(new URL(location, current).toString(), env) : null;
-    if (!redirected) throw new Error('Unapproved upstream redirect');
+    const redirected = location ? validate(new URL(location, current).toString(), env) : null;
+    if (!redirected) throw new Error('Unsafe upstream redirect');
     current = redirected;
   }
   throw new Error('Too many upstream redirects');
+}
+
+function fetchApprovedTarget(target, headers, env) {
+  return fetchValidatedTarget(target, headers, env, approvedTarget);
+}
+
+function fetchSafeTarget(target, headers, env) {
+  return fetchValidatedTarget(target, headers, env, safeMediaTarget);
 }
 
 async function readTextWithLimit(response, maximumBytes) {
@@ -211,10 +231,7 @@ async function readTextWithLimit(response, maximumBytes) {
 }
 
 function normalizeManifestUrl(value, manifestUrl) {
-  const resolved = new URL(value, manifestUrl);
-  const host = resolved.hostname.toLowerCase();
-  if (host.endsWith('.buzz') || host.endsWith('.click')) resolved.host = manifestUrl.host;
-  return resolved.toString();
+  return new URL(value, manifestUrl).toString();
 }
 
 function proxiedHeaders(origin, contentType, cacheControl) {
@@ -282,11 +299,11 @@ async function resolveMegaplay(target, env) {
   const raw = await readTextWithLimit(sourcesResponse, MAX_RESOLVER_BYTES);
   const data = JSON.parse(raw);
   const m3u8 = data?.sources?.file;
-  if (typeof m3u8 !== 'string' || !approvedTarget(m3u8, env)) {
-    throw new Error('Sources response did not contain approved media');
+  if (typeof m3u8 !== 'string' || !safeMediaTarget(m3u8)) {
+    throw new Error('Sources response did not contain safe media');
   }
   const tracks = Array.isArray(data?.tracks)
-    ? data.tracks.filter((track) => track && typeof track.file === 'string' && approvedTarget(track.file, env))
+    ? data.tracks.filter((track) => track && typeof track.file === 'string' && safeMediaTarget(track.file))
     : [];
   return {
     m3u8,
@@ -363,8 +380,8 @@ const worker = {
       return jsonError('The proxy URL is invalid or has expired.', 401, origin);
     }
 
-    const target = approvedTarget(requestUrl.searchParams.get('url') || '', env);
-    if (!target) return jsonError('The streaming destination is not approved.', 403, origin);
+    const target = safeMediaTarget(requestUrl.searchParams.get('url') || '');
+    if (!target) return jsonError('The streaming destination is unsafe.', 403, origin);
 
     const referer = requestUrl.searchParams.get('referer') || '';
     const expiresAt = Number(requestUrl.searchParams.get('exp'));
@@ -390,7 +407,7 @@ const worker = {
     if (range) upstreamHeaders.set('Range', range);
 
     try {
-      const { response: upstream, finalUrl } = await fetchApprovedTarget(target, upstreamHeaders, env);
+      const { response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders, env);
       if (!upstream.ok) return jsonError(`The upstream returned HTTP ${upstream.status}.`, upstream.status, origin);
 
       const contentType = upstream.headers.get('content-type') || '';
@@ -447,6 +464,7 @@ export default worker;
 
 export const testHelpers = {
   approvedTarget,
+  safeMediaTarget,
   isPrivateOrLocalHostname,
   resolverTarget,
   signTarget,
