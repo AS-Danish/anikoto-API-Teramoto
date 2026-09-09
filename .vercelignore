@@ -1,0 +1,9 @@
+.git
+.vercel
+.next
+node_modules
+build
+cloudflare-worker
+.env*
+*.tsbuildinfo
+build-deploy-dry.json

@@ -1,3 +1,4 @@
+import { hedgedPair } from './hedged';
 import { scrapeAnimeDetail, scrapeAnimeEpisodes, scrapeRelatedAnime } from '../scrapers/anime.scraper';
 import { scrapeWatch, WatchData } from '../scrapers/watch.scraper';
 import { getConsumetAnime, getConsumetWatch } from './consumet.provider';
@@ -187,10 +188,10 @@ export async function waterfallWatch(slug: string, epNum: string, requestId = 'u
     },
   ];
 
-  for (const [index, attempt] of attempts.entries()) {
-    if (index < startAt) continue;
+  const run = async (index: number) => {
+    const attempt = attempts[index];
     const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
+    if (remaining <= 0) throw new Error('Provider budget exhausted');
     const startedAt = Date.now();
     playbackLog(requestId, 'provider.attempt_started', {
       provider: attempt.name,
@@ -222,7 +223,20 @@ export async function waterfallWatch(slug: string, epNum: string, requestId = 'u
         elapsedMs: Date.now() - startedAt,
         error: safePlaybackError(error),
       }, 'warn');
+      throw error;
     }
+  };
+
+  // The primary and Shineii share the same canonical slug namespace.
+  // Keep fuzzy catalogue fallbacks behind this pair to avoid a fast wrong match.
+  const canonical = [0, 2].filter((index) => index >= startAt);
+  try {
+    if (canonical.length === 2) return await hedgedPair(() => run(0), () => run(2));
+    if (canonical.length === 1) return await run(canonical[0]);
+  } catch { /* Both canonical providers failed; try alternate catalogues. */ }
+  for (const index of [1, 3].filter((index) => index >= startAt)) {
+    if (Date.now() >= deadline) break;
+    try { return await run(index); } catch { /* Continue within the total budget. */ }
   }
 
   playbackLog(requestId, 'provider.waterfall_exhausted', {

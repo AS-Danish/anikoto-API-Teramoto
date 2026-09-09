@@ -2,6 +2,7 @@ import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants';
 import { makeSignedProxyUrlBuilder } from './proxy-security';
 import { playbackLog, safeHost, safePlaybackError } from './playback-diagnostics';
+import { encryptedSourceValue, sourceMediaUrl } from './source-payload';
 
 export interface SubtitleTrack {
   file: string;
@@ -97,34 +98,58 @@ let _keysCache: Record<string, string> | null = null;
 let _keysCacheAt = 0;
 const KEYS_CACHE_MS = 15 * 60 * 1000;
 
-async function getMegacloudKeys(): Promise<Record<string, string>> {
+let _keysPending: Promise<Record<string, string>> | null = null;
+async function getMegacloudKeys(refresh = false): Promise<Record<string, string>> {
   const now = Date.now();
-  if (_keysCache && now - _keysCacheAt < KEYS_CACHE_MS) return _keysCache;
-  const { data } = await axios.get<Record<string, string>>(
+  if (!refresh && _keysCache && now - _keysCacheAt < KEYS_CACHE_MS) return _keysCache;
+  if (_keysPending) return _keysPending;
+  _keysPending = axios.get<Record<string, string>>(
     'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
-    { timeout: 10000 }
-  );
-  _keysCache = data;
-  _keysCacheAt = now;
-  return data;
+    { timeout: 5000 }
+  ).then(({ data }) => {
+    if (typeof data?.mega !== 'string' || !data.mega) throw new Error('Missing MegaCloud key');
+    _keysCache = data;
+    _keysCacheAt = Date.now();
+    return data;
+  }).finally(() => { _keysPending = null; });
+  return _keysPending;
 }
 
 async function _doMegaplay(
   host: string,
   html: string,
-  referer: string
+  referer: string,
+  embedUrl: string,
 ): Promise<ExtractedStream | null> {
-  const match = html.match(/<title>File ([0-9]+)/);
+  const match = html.match(/<title>\s*File\s+([0-9]+)/i);
   if (!match) return null;
 
   const id = match[1];
-  const { data } = await axios.get(`https://${host}/stream/getSources?id=${id}`, {
+  const sourcesUrl = new URL(`https://${host}/stream/getSources`);
+  sourcesUrl.searchParams.set('id', id);
+  const server = new URL(embedUrl).searchParams.get('s');
+  if (server) sourcesUrl.searchParams.set('s', server);
+  const options = {
     headers: { ...DEFAULT_HEADERS, 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
     timeout: 10000,
-  });
+  };
+  let data;
+  try {
+    ({ data } = await axios.get(sourcesUrl.toString(), options));
+  } catch (error) {
+    const status = (error as { response?: { status?: number } }).response?.status;
+    if (status !== 404 && status !== 410) throw error;
+  }
+  // Switch endpoints whenever the old response has no usable media, including
+  // encrypted strings, empty source arrays, and retired legacy endpoints.
+  if (!sourceMediaUrl(data?.sources)) {
+    sourcesUrl.pathname = '/stream/getSourcesNew';
+    const next = await axios.get(sourcesUrl.toString(), options);
+    data = { ...data, ...next.data };
+  }
 
-  let m3u8: string | undefined = data?.sources?.file;
-  const tracks: SubtitleTrack[] = data?.tracks || [];
+  let m3u8 = sourceMediaUrl(data?.sources);
+  const tracks: SubtitleTrack[] = Array.isArray(data?.tracks) ? data.tracks : [];
   
   const intro = data?.intro && typeof data.intro.start === 'number' && typeof data.intro.end === 'number'
     ? { start: data.intro.start, end: data.intro.end }
@@ -179,7 +204,7 @@ async function _doMegacloud(
     timeout: 10000,
   });
 
-  const tracks: SubtitleTrack[] = data?.tracks || [];
+  const tracks: SubtitleTrack[] = Array.isArray(data?.tracks) ? data.tracks : [];
   
   const intro = data?.intro && typeof data.intro.start === 'number' && typeof data.intro.end === 'number'
     ? { start: data.intro.start, end: data.intro.end }
@@ -190,25 +215,31 @@ async function _doMegacloud(
 
   const streamReferer = origin + '/'; // Referer for CDN stream is megacloud.tv origin
 
-  if (!data.encrypted || data.sources?.[0]?.file.includes('.m3u8')) {
-    return data.sources?.[0]?.file ? { m3u8: data.sources[0].file, referer: streamReferer, tracks, intro, outro } : null;
+  const plain = sourceMediaUrl(data?.sources);
+  if (plain) {
+    return { m3u8: plain, referer: streamReferer, tracks, intro, outro };
   }
-
-  const keys = await getMegacloudKeys();
-  const secret = keys['mega'];
-
-  const decryptUrl =
-    `https://megacloud-api-nine.vercel.app/` +
-    `?encrypted_data=${encodeURIComponent(data.sources[0].file)}` +
-    `&nonce=${encodeURIComponent(nonce)}` +
-    `&secret=${encodeURIComponent(secret)}`;
-
-  const { data: decrypted } = await axios.get(decryptUrl, { timeout: 10000 });
-
-  const m3u8 = (typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted)).match(
-    /"file":"(.*?)"/
-  )?.[1];
-  return m3u8 ? { m3u8, referer: streamReferer, tracks, intro, outro } : null;
+  const encrypted = encryptedSourceValue(data?.sources) || encryptedSourceValue(data?.enc);
+  if (!encrypted) return null;
+  let previousKey = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const keys = await getMegacloudKeys(attempt > 0);
+    const secret = keys.mega;
+    if (secret === previousKey) break;
+    previousKey = secret;
+    const decryptUrl = new URL('https://megacloud-api-nine.vercel.app/');
+    decryptUrl.searchParams.set('encrypted_data', encrypted);
+    decryptUrl.searchParams.set('nonce', nonce);
+    decryptUrl.searchParams.set('secret', secret);
+    try {
+      const { data: decrypted } = await axios.get(decryptUrl.toString(), { timeout: 5000 });
+      const m3u8 = sourceMediaUrl(decrypted);
+      if (m3u8) return { m3u8, referer: streamReferer, tracks, intro, outro };
+    } catch {
+      // One key refresh handles rotations; never loop indefinitely or log keys.
+    }
+  }
+  return null;
 }
 
 export async function extractVidstream(
@@ -263,7 +294,7 @@ export async function extractMegaplay(embedUrl: string): Promise<ExtractedStream
       headers: { ...DEFAULT_HEADERS, Referer: referer },
       timeout: 10000,
     });
-    return await _doMegaplay(host, html, referer);
+    return await _doMegaplay(host, html, referer, embedUrl);
   } catch (err) {
     console.error('Megaplay extraction failed:', err);
     return null;
@@ -404,7 +435,7 @@ export async function extractStreamUrl(
         finalHost.includes('vidwish.live') ||
         finalHost.includes('vidtube.site')
       ) {
-        return await _doMegaplay(new URL(currentUrl).host, html, finalReferer);
+        return await _doMegaplay(new URL(currentUrl).host, html, finalReferer, currentUrl);
       }
       if (finalHost.includes('megacloud.blog')) {
         return await _doMegacloud(currentUrl, html, currentUrl); // Use currentUrl as referer for getSources!
