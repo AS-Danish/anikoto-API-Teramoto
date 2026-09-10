@@ -1,3 +1,5 @@
+import { normalizeSegment } from './segment-normalization.js';
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36';
 const SIGNATURE_VERSION = '1';
@@ -188,12 +190,13 @@ function isRedirect(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function fetchValidatedTarget(target, headers, env, validate) {
+async function fetchValidatedTarget(target, headers, env, validate, signal) {
   let current = target;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await fetch(current, { headers, redirect: 'manual' });
+    const response = await fetch(current, { headers, redirect: 'manual', signal });
     if (!isRedirect(response.status)) return { response, finalUrl: current };
     const location = response.headers.get('location');
+    await response.body?.cancel();
     const redirected = location ? validate(new URL(location, current).toString(), env) : null;
     if (!redirected) throw new Error('Unsafe upstream redirect');
     current = redirected;
@@ -205,8 +208,67 @@ function fetchApprovedTarget(target, headers, env) {
   return fetchValidatedTarget(target, headers, env, approvedTarget);
 }
 
-function fetchSafeTarget(target, headers, env) {
-  return fetchValidatedTarget(target, headers, env, safeMediaTarget);
+function fetchSafeTarget(target, headers, env, signal) {
+  return fetchValidatedTarget(target, headers, env, safeMediaTarget, signal);
+}
+
+// Some masters advertise qualities whose playlists exist but whose video files
+// are gone. Adaptive players select those qualities and fail even though a
+// sibling quality is playable. Check a small, bounded set before advertising it.
+async function filterMissingVariants(manifest, manifestUrl, headers, env) {
+  const lines = manifest.split(/\r?\n/);
+  const variants = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim().startsWith('#EXT-X-STREAM-INF:')) continue;
+    let child = i + 1;
+    while (child < lines.length && !lines[child].trim()) child++;
+    if (child < lines.length && !lines[child].trim().startsWith('#')) {
+      variants.push({ tag: i, child, url: lines[child].trim() });
+    }
+  }
+  if (variants.length < 2 || variants.length > 6) return manifest;
+  const signal = AbortSignal.timeout(3000);
+  const probeHeaders = new Headers(headers);
+  probeHeaders.delete('Range');
+  async function check(variant) {
+    try {
+      const target = safeMediaTarget(new URL(variant.url, manifestUrl).href);
+      if (!target) return 'unknown'; // Normal signing still rejects unsafe URLs.
+      const { response, finalUrl } = await fetchSafeTarget(target, probeHeaders, env, signal);
+      if (!response.ok) {
+        await response.body?.cancel();
+        return [404, 410].includes(response.status) ? 'missing' : 'unknown';
+      }
+      const playlist = await readTextWithLimit(response, MAX_MANIFEST_BYTES);
+      if (!playlist.trimStart().startsWith('#EXTM3U') || !playlist.includes('#EXTINF:')) return 'unknown';
+      const first = playlist.split(/\r?\n/).map(line => line.trim()).find(line => line && !line.startsWith('#'));
+      const segment = first && safeMediaTarget(new URL(first, finalUrl).href);
+      if (!segment) return 'unknown';
+      const segmentHeaders = new Headers(probeHeaders);
+      segmentHeaders.set('Range', 'bytes=0-0');
+      const { response: media } = await fetchSafeTarget(segment, segmentHeaders, env, signal);
+      await media.body?.cancel();
+      return media.ok ? 'healthy' : [404, 410].includes(media.status) ? 'missing' : 'unknown';
+    } catch {
+      // A timeout or transient host error is not evidence of a missing quality.
+      return 'unknown';
+    }
+  }
+  // At most three active probes; all share the same deadline.
+  const results = [];
+  for (let i = 0; i < variants.length; i += 3) {
+    results.push(...await Promise.all(variants.slice(i, i + 3).map(check)));
+  }
+  if (results.every(result => result === 'missing')) throw new Error('All advertised qualities are missing');
+  if (!results.includes('healthy')) return manifest;
+  const removed = new Set();
+  results.forEach((result, index) => {
+    if (result === 'missing') {
+      removed.add(variants[index].tag);
+      removed.add(variants[index].child);
+    }
+  });
+  return lines.filter((_, index) => !removed.has(index)).join('\n');
 }
 
 async function readTextWithLimit(response, maximumBytes) {
@@ -272,6 +334,24 @@ function resolverHeaders(referer, accept) {
   return headers;
 }
 
+function sourceMediaUrl(value, depth = 0) {
+  if (depth > 4 || value == null) return null;
+  if (typeof value === 'string') {
+    const safe = safeMediaTarget(value);
+    if (safe) return safe.href;
+    try { return sourceMediaUrl(JSON.parse(value), depth + 1); } catch { return null; }
+  }
+  if (Array.isArray(value)) {
+    for (const source of value) {
+      const media = sourceMediaUrl(source, depth + 1);
+      if (media) return media;
+    }
+    return null;
+  }
+  if (typeof value === 'object') return sourceMediaUrl(value.file ?? value.url ?? value.sources, depth + 1);
+  return null;
+}
+
 async function resolveMegaplay(target, env) {
   const embedReferer = `${target.origin}/`;
   const { response: embedResponse } = await fetchApprovedTarget(
@@ -295,10 +375,28 @@ async function resolveMegaplay(target, env) {
     resolverHeaders(embedReferer, 'application/json, text/javascript, */*'),
     env,
   );
-  if (!sourcesResponse.ok) throw new Error(`Sources returned HTTP ${sourcesResponse.status}`);
-  const raw = await readTextWithLimit(sourcesResponse, MAX_RESOLVER_BYTES);
-  const data = JSON.parse(raw);
-  const m3u8 = data?.sources?.file;
+  let data = {};
+  if (sourcesResponse.ok) {
+    const raw = await readTextWithLimit(sourcesResponse, MAX_RESOLVER_BYTES);
+    try { data = JSON.parse(raw); } catch { /* Try the newer endpoint once. */ }
+  } else {
+    await sourcesResponse.body?.cancel();
+    if (![404, 410].includes(sourcesResponse.status)) throw new Error(`Sources returned HTTP ${sourcesResponse.status}`);
+  }
+  // Handle encrypted/empty/changed schemas and retired legacy endpoints.
+  if (!sourceMediaUrl(data?.sources)) {
+    sourcesUrl.pathname = '/stream/getSourcesNew';
+    const nextTarget = approvedTarget(sourcesUrl.toString(), env);
+    if (!nextTarget) throw new Error('Sources endpoint is not approved');
+    const { response } = await fetchApprovedTarget(
+      nextTarget,
+      resolverHeaders(embedReferer, 'application/json, text/javascript, */*'),
+      env,
+    );
+    if (!response.ok) throw new Error(`Sources returned HTTP ${response.status}`);
+    data = { ...data, ...JSON.parse(await readTextWithLimit(response, MAX_RESOLVER_BYTES)) };
+  }
+  const m3u8 = sourceMediaUrl(data?.sources);
   if (typeof m3u8 !== 'string' || !safeMediaTarget(m3u8)) {
     throw new Error('Sources response did not contain safe media');
   }
@@ -404,7 +502,10 @@ const worker = {
       }
     }
     const range = request.headers.get('Range');
-    if (range) upstreamHeaders.set('Range', range);
+    // Image-wrapped segments change byte offsets when normalized. Serve a full
+    // 200 representation for these URLs instead of forwarding a stale range.
+    const imageSegment = /\.(?:image|png)$/i.test(target.pathname);
+    if (range && !imageSegment) upstreamHeaders.set('Range', range);
 
     try {
       const { response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders, env);
@@ -416,7 +517,9 @@ const worker = {
       const isSubtitle = /\.(?:vtt|srt|ass)(?:$|[?#])/i.test(finalUrl.toString()) || lowerContentType.includes('vtt');
 
       if (isManifest) {
-        const manifest = await readTextWithLimit(upstream, MAX_MANIFEST_BYTES);
+        const manifest = await filterMissingVariants(
+          await readTextWithLimit(upstream, MAX_MANIFEST_BYTES), finalUrl, upstreamHeaders, env,
+        );
         const workerBase = requestUrl.origin;
         const proxyChild = (value) => signedProxyUrl(
           workerBase,
@@ -452,7 +555,15 @@ const worker = {
         const value = upstream.headers.get(name);
         if (value) headers.set(name, value);
       }
-      return new Response(upstream.body, { status: upstream.status, headers });
+      const normalized = !isSubtitle && upstream.status === 200
+        ? await normalizeSegment(upstream.body)
+        : { body: upstream.body, removedBytes: 0 };
+      if (normalized.removedBytes) {
+        headers.set('Content-Type', 'video/mp2t');
+        for (const name of ['content-length', 'content-range', 'accept-ranges', 'etag']) headers.delete(name);
+        headers.set('Accept-Ranges', 'none');
+      }
+      return new Response(normalized.body, { status: upstream.status, headers });
     } catch (error) {
       console.log(JSON.stringify({ event: 'proxy_upstream_error', message: String(error) }));
       return jsonError('The streaming source could not be reached.', 502, origin);

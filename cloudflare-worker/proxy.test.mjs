@@ -54,6 +54,43 @@ beforeEach(() => {
   globalThis.fetch = realFetch;
 });
 
+test('normalizes image-hosted TS and removes stale representation headers', async () => {
+  const prefix = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const media = new Uint8Array(188 * 4);
+  for (let i = 0; i < media.length; i += 188) media.set([0x47, 0x40, 0, 0x10], i);
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(options.headers.get('Range'), null);
+    return new Response(Uint8Array.from([...prefix, ...media]), {
+      headers: { 'content-type': 'image/png', 'content-length': String(prefix.length + media.length),
+        'accept-ranges': 'bytes', etag: 'original' },
+    });
+  };
+  const signed = await signedRequest('https://cdn.example/segment.image');
+  const request = new Request(signed, { headers: new Headers(signed.headers) });
+  request.headers.set('Range', 'bytes=0-');
+  const response = await worker.fetch(request, environment());
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'video/mp2t');
+  assert.equal(response.headers.get('content-length'), null);
+  assert.equal(response.headers.get('etag'), null);
+  assert.equal(response.headers.get('accept-ranges'), 'none');
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), media);
+});
+
+test('preserves byte ranges for ordinary media', async () => {
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(options.headers.get('Range'), 'bytes=100-103');
+    return new Response(Uint8Array.from([1, 2, 3, 4]), { status: 206,
+      headers: { 'content-type': 'video/mp4', 'content-range': 'bytes 100-103/1000' } });
+  };
+  const request = await signedRequest('https://cdn.example/video.mp4');
+  request.headers.set('Range', 'bytes=100-103');
+  const response = await worker.fetch(request, environment());
+  assert.equal(response.status, 206);
+  assert.equal(response.headers.get('content-range'), 'bytes 100-103/1000');
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), Uint8Array.from([1, 2, 3, 4]));
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
 });
@@ -241,3 +278,109 @@ test('rejects unsigned and non-MegaPlay resolver requests', async () => {
   const wrongHost = await worker.fetch(signedWrongHost, environment());
   assert.equal(wrongHost.status, 403);
 });
+
+test('resolves encrypted recent uploads through the new endpoint, preserving the server parameter', async () => {
+  const paths = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    if (url.pathname.startsWith('/stream/s-2/')) {
+      return new Response('<title>File 179446 - MegaPlay</title>');
+    }
+    assert.equal(url.searchParams.get('id'), '179446');
+    assert.equal(url.searchParams.get('s'), 'bcdn');
+    if (url.pathname === '/stream/getSources') return Response.json({ enc: 'encrypted-source' });
+    assert.equal(url.pathname, '/stream/getSourcesNew');
+    return Response.json({ sources: { file: 'https://ncdn.imgnex.top/anime/master.m3u8' },
+      tracks: [{ file: 'https://cdn.imgnex.top/en.vtt', label: 'English' }] });
+  };
+  const response = await worker.fetch(
+    await signedResolverRequest('https://megaplay.buzz/stream/s-2/694644/sub?s=bcdn'), environment(),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.m3u8, 'https://ncdn.imgnex.top/anime/master.m3u8');
+  assert.equal(body.tracks.length, 1);
+  assert.equal(paths.length, 3);
+});
+
+const qualityMaster = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080\n1080.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720\n720.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=700000,RESOLUTION=854x480\n480.m3u8\n';
+
+function qualityResponses(statusForSegment) {
+  globalThis.fetch = async (input, options) => {
+    const url = new URL(String(input));
+    assert.notEqual(url.hostname, '127.0.0.1');
+    if (url.pathname.endsWith('/master.m3u8')) return new Response(qualityMaster);
+    if (url.pathname.endsWith('.m3u8')) {
+      assert.equal(options.headers.get('Range'), null);
+      const name = url.pathname.split('/').pop().replace('.m3u8', '.ts');
+      return new Response(`#EXTM3U\n#EXTINF:8,\n${name}\n#EXT-X-ENDLIST\n`);
+    }
+    assert.equal(options.headers.get('Range'), 'bytes=0-0');
+    return new Response('media', { status: statusForSegment(url) });
+  };
+}
+
+test('MHA episode 10: excludes 720p/480p with missing segments while keeping signed 1080p', async () => {
+  qualityResponses(url => url.pathname.endsWith('1080.ts') ? 206 : url.pathname.endsWith('720.ts') ? 404 : 410);
+  const response = await worker.fetch(await signedRequest('https://cdn.example/sub/master.m3u8'), environment());
+  assert.equal(response.status, 200);
+  const manifest = await response.text();
+  assert.match(manifest, /RESOLUTION=1920x1080/);
+  assert.doesNotMatch(manifest, /1280x720|854x480/);
+  const child = new URL(manifest.split('\n').find(line => line.startsWith('https:')));
+  assert.equal(child.searchParams.get('url'), 'https://cdn.example/sub/1080.m3u8');
+  assert.equal(child.searchParams.get('sig'), await testHelpers.signTarget(secret,
+    child.searchParams.get('url'), child.searchParams.get('referer'), Number(child.searchParams.get('exp'))));
+});
+
+test('healthy quality choices and transient failures remain advertised', async () => {
+  qualityResponses(url => url.pathname.endsWith('480.ts') ? 503 : 206);
+  const response = await worker.fetch(await signedRequest('https://cdn.example/master.m3u8'), environment());
+  const manifest = await response.text();
+  assert.match(manifest, /1920x1080/);
+  assert.match(manifest, /1280x720/);
+  assert.match(manifest, /854x480/);
+});
+
+test('all missing qualities return an error rather than a playable-looking empty master', async () => {
+  qualityResponses(() => 404);
+  const response = await worker.fetch(await signedRequest('https://cdn.example/master.m3u8'), environment());
+  assert.equal(response.status, 502);
+});
+
+test('quality health checks never follow private redirects', async () => {
+  const calls = [];
+  globalThis.fetch = async input => {
+    const url = new URL(String(input));
+    calls.push(url.hostname);
+    if (url.pathname.endsWith('/master.m3u8')) return new Response(qualityMaster);
+    return new Response(null, { status: 302, headers: { Location: 'https://127.0.0.1/private' } });
+  };
+  const response = await worker.fetch(await signedRequest('https://cdn.example/master.m3u8'), environment());
+  assert.equal(response.status, 200);
+  assert.ok(calls.every(host => host === 'cdn.example'));
+});
+
+for (const legacy of [{ sources: [], enc: 'cipher' }, { sources: 'cipher' }, { sources: [{ file: 'cipher' }] }, null]) {
+  test(`resolver adapts unusable or retired sources: ${JSON.stringify(legacy)}`, async () => {
+    let count = 0;
+    globalThis.fetch = async input => {
+      count++;
+      const url = new URL(String(input));
+      if (url.pathname.startsWith('/stream/s-2/')) return new Response('<title>File 146530</title>');
+      if (url.pathname === '/stream/getSources') return legacy == null
+        ? new Response('gone', { status: 410 })
+        : Response.json({ ...legacy, tracks: [{ file: 'https://cdn.example/en.vtt' }] });
+      assert.equal(url.pathname, '/stream/getSourcesNew');
+      assert.equal(url.searchParams.get('s'), 'bcdn');
+      return Response.json({ sources: [{ file: 'cipher' }, { url: 'https://cdn.example/master.m3u8' }] });
+    };
+    const response = await worker.fetch(await signedResolverRequest('https://megaplay.buzz/stream/s-2/6219/sub?s=bcdn'), environment());
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.m3u8, 'https://cdn.example/master.m3u8');
+    assert.equal(body.tracks.length, legacy == null ? 0 : 1);
+    assert.equal(count, 3);
+  });
+}
