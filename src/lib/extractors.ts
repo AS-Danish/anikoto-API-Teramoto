@@ -2,7 +2,11 @@ import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants';
 import { makeSignedProxyUrlBuilder } from './proxy-security';
 import { playbackLog, safeHost, safePlaybackError } from './playback-diagnostics';
-import { encryptedSourceValue, sourceMediaUrl } from './source-payload';
+import {
+  decryptMegaplaySource,
+  encryptedSourceValue,
+  sourceMediaUrl,
+} from './source-payload';
 
 export interface SubtitleTrack {
   file: string;
@@ -121,7 +125,8 @@ async function _doMegaplay(
   referer: string,
   embedUrl: string,
 ): Promise<ExtractedStream | null> {
-  const match = html.match(/<title>\s*File\s+([0-9]+)/i);
+  const match = html.match(/\bdata-id=["']([0-9]+)["']/i) ||
+    html.match(/<title>\s*File\s+([0-9]+)/i);
   if (!match) return null;
 
   const id = match[1];
@@ -157,6 +162,23 @@ async function _doMegaplay(
   const outro = data?.outro && typeof data.outro.start === 'number' && typeof data.outro.end === 'number'
     ? { start: data.outro.start, end: data.outro.end }
     : undefined;
+
+  if (!m3u8) {
+    const encrypted = encryptedSourceValue(data?.enc) || encryptedSourceValue(data?.sources);
+    const clientPath = html.match(/<script[^>]+src=["']([^"']*newclient(?:\.min)?\.js[^"']*)["']/i)?.[1];
+    if (encrypted && clientPath) {
+      try {
+        const clientUrl = new URL(clientPath, embedUrl).toString();
+        const { data: clientScript } = await axios.get<string>(clientUrl, {
+          ...options,
+          headers: { ...options.headers, Referer: embedUrl },
+        });
+        m3u8 = sourceMediaUrl(await decryptMegaplaySource(encrypted, clientScript));
+      } catch {
+        // The Worker fallback gets the same bounded decryption attempt.
+      }
+    }
+  }
 
   if (m3u8 && m3u8.includes('mewstream.buzz')) {
     let replacementHost = '1oe.lostproject.club';

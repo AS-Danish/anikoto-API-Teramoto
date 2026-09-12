@@ -8,6 +8,7 @@ import {
   playbackRequestId,
   safePlaybackError,
 } from '@/lib/playback-diagnostics';
+import { withMediaIdleTimeout } from '@/lib/media-transfer';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,12 +35,24 @@ function isRedirect(status: number) {
 async function fetchSafeTarget(target: URL, headers: Headers) {
   let current = target;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await fetch(current, {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20_000);
+    let upstream: Response;
+    try {
+      upstream = await fetch(current, {
       headers,
       redirect: 'manual',
-      signal: AbortSignal.timeout(20_000),
-    });
+      signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    const response = new Response(
+      upstream.body ? withMediaIdleTimeout(upstream.body, controller) : null,
+      { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers },
+    );
     if (!isRedirect(response.status)) return { response, finalUrl: current };
+    await response.body?.cancel();
     const location = response.headers.get('location');
     const redirected = location ? parseSafeMediaTarget(new URL(location, current).toString()) : null;
     if (!redirected) throw new Error('The upstream redirect destination is unsafe.');

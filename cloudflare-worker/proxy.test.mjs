@@ -9,6 +9,19 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const secret = 'test-only-signing-secret-with-more-than-32-characters';
 const allowedOrigin = 'http://localhost:3000';
 const realFetch = globalThis.fetch;
+const playerKey = 'i?LMTAx0Q6,:}50U';
+const playerIv = "W0;27ToaUpl_P%'c";
+const clientScript = `(function(r){"use strict";var E="${playerKey}",C="${playerIv}",P=/\\/segment\\//;})();`;
+
+async function encryptFixture(value) {
+  const keyBytes = new Uint8Array(32);
+  keyBytes.set(new TextEncoder().encode(playerKey));
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv: new TextEncoder().encode(playerIv) }, key, new TextEncoder().encode(value),
+  );
+  return Buffer.from(encrypted).toString('base64url');
+}
 
 function limiter(success = true) {
   return { limit: async () => ({ success }) };
@@ -52,6 +65,47 @@ async function signedRequest(target, options = {}) {
 
 beforeEach(() => {
   globalThis.fetch = realFetch;
+});
+
+test('truncated wrapped segment retries before any corrupt bytes reach the client', async () => {
+  const prefix = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const media = new Uint8Array(188 * 5);
+  for (let i = 0; i < media.length; i += 188) media.set([0x47, 0x40, 0, 0x10], i);
+  const full = Uint8Array.from([...prefix, ...media]);
+  let calls = 0;
+  globalThis.fetch = async () => new Response(++calls === 1 ? full.slice(0, 601) : full, {
+    headers: { 'content-type': 'image/png', 'content-length': String(full.length) },
+  });
+  const response = await worker.fetch(await signedRequest('https://cdn.example/segment.image'), environment());
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), media);
+});
+
+test('persistent segment truncation returns an error after bounded retries', async () => {
+  const bytes = new Uint8Array(601);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+  for (const i of [8, 196, 384, 572]) bytes.set([0x47, 0x40, 0, 0x10], i);
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(bytes, { headers: { 'content-type': 'image/png', 'content-length': '948' } });
+  };
+  const response = await worker.fetch(await signedRequest('https://cdn.example/segment.image'), environment());
+  assert.equal(response.status, 502);
+  assert.equal(calls, 3);
+});
+
+test('media proxy recovers a temporary 503 without returning an error page as video', async () => {
+  let calls = 0;
+  const bytes = Uint8Array.from([0x47, 0x40, 0, 0x10, 1, 2, 3]);
+  globalThis.fetch = async () => ++calls === 1
+    ? new Response('temporarily unavailable', { status: 503 })
+    : new Response(bytes, { headers: { 'content-type': 'video/mp2t' } });
+  const response = await worker.fetch(await signedRequest('https://cdn.example/a.ts'), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+  assert.equal(calls, 2);
 });
 
 test('normalizes image-hosted TS and removes stale representation headers', async () => {
@@ -302,6 +356,53 @@ test('resolves encrypted recent uploads through the new endpoint, preserving the
   assert.equal(body.m3u8, 'https://ncdn.imgnex.top/anime/master.m3u8');
   assert.equal(body.tracks.length, 1);
   assert.equal(paths.length, 3);
+});
+
+test('resolves the encrypted MHA season 3 episode 13 envelope from the linked client', async () => {
+  const encrypted = await encryptFixture(JSON.stringify({ file: 'https://media.example/mha-s3-e13/master.m3u8' }));
+  const paths = [];
+  globalThis.fetch = async input => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    if (url.pathname.startsWith('/stream/s-2/')) {
+      return new Response('<div data-id="33982"></div><script src="/lib/newclient.min.js?v=4.7"></script>');
+    }
+    if (url.pathname === '/stream/getSources' || url.pathname === '/stream/getSourcesNew') {
+      return Response.json({ enc: encrypted, tracks: [{ file: 'https://cdn.example/en.vtt' }] });
+    }
+    if (url.pathname === '/lib/newclient.min.js') return new Response(clientScript);
+    return new Response('unexpected', { status: 500 });
+  };
+  const response = await worker.fetch(
+    await signedResolverRequest('https://megaplay.buzz/stream/s-2/4488/sub?s=tcdn'), environment(),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.m3u8, 'https://media.example/mha-s3-e13/master.m3u8');
+  assert.equal(body.tracks.length, 1);
+  assert.deepEqual(paths, [
+    '/stream/s-2/4488/sub', '/stream/getSources', '/stream/getSourcesNew', '/lib/newclient.min.js',
+  ]);
+});
+
+test('decrypts encrypted manifest targets before signing them for downloads', async () => {
+  const mediaUrl = 'https://media.example/mha-s3-e13/segment-001.ts';
+  const token = await encryptFixture(mediaUrl);
+  globalThis.fetch = async input => {
+    const url = new URL(String(input));
+    if (url.pathname === '/master.m3u8') {
+      return new Response(`#EXTM3U\n#EXTINF:8,\n/segment/${token}\n#EXT-X-ENDLIST\n`, {
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      });
+    }
+    if (url.pathname === '/lib/newclient.min.js') return new Response(clientScript);
+    return new Response('unexpected', { status: 500 });
+  };
+  const response = await worker.fetch(await signedRequest('https://cdn.example/master.m3u8'), environment());
+  assert.equal(response.status, 200);
+  const manifest = await response.text();
+  const signedLine = manifest.split('\n').find(line => line.startsWith('https:'));
+  assert.equal(new URL(signedLine).searchParams.get('url'), mediaUrl);
 });
 
 const qualityMaster = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080\n1080.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720\n720.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=700000,RESOLUTION=854x480\n480.m3u8\n';

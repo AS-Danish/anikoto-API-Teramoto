@@ -7,3 +7,4 @@ cloudflare-worker
 .env*
 *.tsbuildinfo
 build-deploy-dry.json
+test/media-audit-*

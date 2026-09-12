@@ -1,4 +1,6 @@
 import { normalizeSegment } from './segment-normalization.js';
+import { fetchMediaWithRetry } from './media-retry.js';
+import { bufferCompleteTs } from './segment-validation.js';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36';
@@ -190,10 +192,13 @@ function isRedirect(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function fetchValidatedTarget(target, headers, env, validate, signal) {
+async function fetchValidatedTarget(target, headers, env, validate, signal, retryMedia = false) {
   let current = target;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await fetch(current, { headers, redirect: 'manual', signal });
+    const options = { headers, redirect: 'manual', signal };
+    const response = retryMedia
+      ? await fetchMediaWithRetry(current, options)
+      : await fetch(current, options);
     if (!isRedirect(response.status)) return { response, finalUrl: current };
     const location = response.headers.get('location');
     await response.body?.cancel();
@@ -208,8 +213,8 @@ function fetchApprovedTarget(target, headers, env) {
   return fetchValidatedTarget(target, headers, env, approvedTarget);
 }
 
-function fetchSafeTarget(target, headers, env, signal) {
-  return fetchValidatedTarget(target, headers, env, safeMediaTarget, signal);
+function fetchSafeTarget(target, headers, env, signal, retryMedia = false) {
+  return fetchValidatedTarget(target, headers, env, safeMediaTarget, signal, retryMedia);
 }
 
 // Some masters advertise qualities whose playlists exist but whose video files
@@ -352,6 +357,82 @@ function sourceMediaUrl(value, depth = 0) {
   return null;
 }
 
+function encryptedSourceValue(value) {
+  if (typeof value === 'string') return value.trim() || null;
+  if (Array.isArray(value)) return encryptedSourceValue(value[0]);
+  if (value && typeof value === 'object') return typeof value.file === 'string' ? value.file : null;
+  return null;
+}
+
+function megaplayCipherConfig(clientScript) {
+  const match = clientScript.match(
+    /["']use strict["'];var\s+[$\w]+="([^"]{16,64})",[$\w]+="([^"]{16,32})",[$\w]+=\/\\\/segment\\\//,
+  );
+  return match ? { key: match[1], iv: match[2] } : null;
+}
+
+function base64UrlBytes(value) {
+  const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
+  const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4));
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function paddedUtf8(value, length) {
+  const encoded = new TextEncoder().encode(value);
+  const result = new Uint8Array(length);
+  result.set(encoded.subarray(0, length));
+  return result;
+}
+
+async function decryptMegaplayCiphertext(encrypted, clientScript) {
+  const config = megaplayCipherConfig(clientScript);
+  if (!config || config.iv.length !== 16) throw new Error('Unsupported MegaPlay cipher configuration');
+  const key = await crypto.subtle.importKey(
+    'raw', paddedUtf8(config.key, 32), { name: 'AES-CBC' }, false, ['decrypt'],
+  );
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv: paddedUtf8(config.iv, 16) }, key, base64UrlBytes(encrypted),
+  );
+  return new TextDecoder().decode(plaintext);
+}
+
+async function fetchMegaplayClient(clientUrl, referer, env) {
+  const approved = approvedTarget(clientUrl.toString(), env);
+  if (!approved) throw new Error('MegaPlay client script is not approved');
+  const { response } = await fetchApprovedTarget(
+    approved, resolverHeaders(referer, 'application/javascript, text/javascript, */*'), env,
+  );
+  if (!response.ok) throw new Error(`MegaPlay client returned HTTP ${response.status}`);
+  return readTextWithLimit(response, MAX_RESOLVER_BYTES);
+}
+
+async function decryptMegaplayManifestTargets(manifest, manifestUrl, env) {
+  if (!/\/segment\/[A-Za-z0-9_-]+/.test(manifest)) return manifest;
+  const clientScript = await fetchMegaplayClient(
+    new URL('/lib/newclient.min.js', 'https://megaplay.buzz'),
+    'https://megaplay.buzz/',
+    env,
+  );
+  async function decryptTarget(value) {
+    const absolute = new URL(value, manifestUrl);
+    const token = absolute.pathname.match(/\/segment\/([A-Za-z0-9_-]+)/)?.[1];
+    if (!token) return value;
+    const decrypted = await decryptMegaplayCiphertext(token, clientScript);
+    const safe = safeMediaTarget(decrypted);
+    if (!safe) throw new Error('MegaPlay segment decrypted to an unsafe destination');
+    return safe.href;
+  }
+  const lines = await Promise.all(manifest.split(/\r?\n/).map(async line => {
+    let result = line;
+    for (const match of [...result.matchAll(/URI=["']([^"']+)["']/g)]) {
+      result = result.replace(match[0], `URI="${await decryptTarget(match[1])}"`);
+    }
+    const trimmed = result.trim();
+    return trimmed && !trimmed.startsWith('#') ? decryptTarget(trimmed) : result;
+  }));
+  return lines.join('\n');
+}
+
 async function resolveMegaplay(target, env) {
   const embedReferer = `${target.origin}/`;
   const { response: embedResponse } = await fetchApprovedTarget(
@@ -361,7 +442,8 @@ async function resolveMegaplay(target, env) {
   );
   if (!embedResponse.ok) throw new Error(`Embed returned HTTP ${embedResponse.status}`);
   const html = await readTextWithLimit(embedResponse, MAX_RESOLVER_BYTES);
-  const fileId = html.match(/<title>\s*File\s+([0-9]+)/i)?.[1];
+  const fileId = html.match(/\bdata-id=["']([0-9]+)["']/i)?.[1] ||
+    html.match(/<title>\s*File\s+([0-9]+)/i)?.[1];
   if (!fileId) throw new Error('Embed did not contain a file ID');
 
   const sourcesUrl = new URL('/stream/getSources', target.origin);
@@ -396,7 +478,15 @@ async function resolveMegaplay(target, env) {
     if (!response.ok) throw new Error(`Sources returned HTTP ${response.status}`);
     data = { ...data, ...JSON.parse(await readTextWithLimit(response, MAX_RESOLVER_BYTES)) };
   }
-  const m3u8 = sourceMediaUrl(data?.sources);
+  let m3u8 = sourceMediaUrl(data?.sources);
+  if (!m3u8) {
+    const encrypted = encryptedSourceValue(data?.enc) || encryptedSourceValue(data?.sources);
+    const clientPath = html.match(/<script[^>]+src=["']([^"']*newclient(?:\.min)?\.js[^"']*)["']/i)?.[1];
+    if (encrypted && clientPath) {
+      const clientScript = await fetchMegaplayClient(new URL(clientPath, target), target.href, env);
+      m3u8 = sourceMediaUrl(JSON.parse(await decryptMegaplayCiphertext(encrypted, clientScript)));
+    }
+  }
   if (typeof m3u8 !== 'string' || !safeMediaTarget(m3u8)) {
     throw new Error('Sources response did not contain safe media');
   }
@@ -508,7 +598,7 @@ const worker = {
     if (range && !imageSegment) upstreamHeaders.set('Range', range);
 
     try {
-      const { response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders, env);
+      let { response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders, env, request.signal, true);
       if (!upstream.ok) return jsonError(`The upstream returned HTTP ${upstream.status}.`, upstream.status, origin);
 
       const contentType = upstream.headers.get('content-type') || '';
@@ -517,9 +607,10 @@ const worker = {
       const isSubtitle = /\.(?:vtt|srt|ass)(?:$|[?#])/i.test(finalUrl.toString()) || lowerContentType.includes('vtt');
 
       if (isManifest) {
-        const manifest = await filterMissingVariants(
-          await readTextWithLimit(upstream, MAX_MANIFEST_BYTES), finalUrl, upstreamHeaders, env,
+        const decryptedManifest = await decryptMegaplayManifestTargets(
+          await readTextWithLimit(upstream, MAX_MANIFEST_BYTES), finalUrl, env,
         );
+        const manifest = await filterMissingVariants(decryptedManifest, finalUrl, upstreamHeaders, env);
         const workerBase = requestUrl.origin;
         const proxyChild = (value) => signedProxyUrl(
           workerBase,
@@ -555,9 +646,29 @@ const worker = {
         const value = upstream.headers.get(name);
         if (value) headers.set(name, value);
       }
-      const normalized = !isSubtitle && upstream.status === 200
-        ? await normalizeSegment(upstream.body)
-        : { body: upstream.body, removedBytes: 0 };
+      let normalized;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          normalized = !isSubtitle && upstream.status === 200
+            ? await normalizeSegment(upstream.body)
+            : { body: upstream.body, removedBytes: 0 };
+          if (normalized.removedBytes) {
+            const declared = Number(upstream.headers.get('content-length'));
+            const expected = declared > 0 && !upstream.headers.get('content-encoding')
+              ? declared - normalized.removedBytes : null;
+            normalized.body = await bufferCompleteTs(normalized.body, expected);
+          }
+          break;
+        } catch (error) {
+          if (attempt >= 2 || request.signal.aborted) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+          ({ response: upstream, finalUrl } = await fetchSafeTarget(target, upstreamHeaders, env, request.signal, true));
+          if (!upstream.ok) {
+            await upstream.body?.cancel();
+            throw new Error(`Segment retry HTTP ${upstream.status}`);
+          }
+        }
+      }
       if (normalized.removedBytes) {
         headers.set('Content-Type', 'video/mp2t');
         for (const name of ['content-length', 'content-range', 'accept-ranges', 'etag']) headers.delete(name);
